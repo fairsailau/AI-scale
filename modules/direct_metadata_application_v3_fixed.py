@@ -19,7 +19,7 @@ from typing import Dict, Any, Tuple, List, Optional
 # Assume utils is in .utils
 from . import utils # Import utils module to use get_box_client
 
-logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Helper Functions ---
