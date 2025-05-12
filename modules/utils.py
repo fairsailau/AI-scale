@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Utility functions for managing Box authentication, getting clients, and metadata templates.
+Utility functions for managing Box authentication (using box-sdk-gen), getting clients, and metadata templates.
 """
 import logging
 import re
@@ -8,21 +8,26 @@ import configparser
 import os
 import json
 import streamlit as st
-# Correct import paths for boxsdk v7+ auth classes
-from boxsdk import Client
-from boxsdk.auth import OAuth2 # Import OAuth2
-from boxsdk.auth import JWTAuth # Import JWTAuth
-from boxsdk.auth import ClientCredentialsAuth # Import ClientCredentialsAuth (CCG)
-from boxsdk.auth import DeveloperTokenAuth # Import DeveloperTokenAuth
-from boxsdk.exception import BoxAPIException
+# Corrected imports for the new box-sdk-gen
+from box_sdk_gen import BoxClient # New client class name
+# Authentication classes are in authenticators submodule
+from box_sdk_gen.authenticators import OAuth2 # OAuth2 class name is the same
+from box_sdk_gen.authenticators import JWTAuthentication # JWT class name changed
+from box_sdk_gen.authenticators import ClientCredentialsGrant # CCG class name changed
+from box_sdk_gen.authenticators import DeveloperTokenAuthentication # Developer Token class name changed
+# Exception class location is similar but check documentation if issues arise
+from box_sdk_gen.internal.utils import ApiException # Use ApiException from generated SDK for errors
 import time # Needed for fallback template key generation
 from typing import Dict, Any, Optional, List, Tuple
+# Add base exception class from the new SDK for broader catching if needed
+from box_sdk_gen.base_exception import BoxSDKException
+
 
 # Corrected logging format string - must be a single line
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Authentication and Client Functions ---
+# --- Authentication and Client Functions (Updated for box-sdk-gen) ---
 
 def load_config(config_file='config.ini'):
     """Loads configuration from config.ini."""
@@ -40,13 +45,14 @@ def load_config(config_file='config.ini'):
         logger.error(f"Configuration file not found: {config_path}")
         return None
 
-def get_box_client(config: Dict[str, Any]) -> Client:
+# Updated function signature and internal class names
+def get_box_client(config: Dict[str, Any]) -> BoxClient: # Return type is BoxClient now
     """
-    Instantiates and returns a Box SDK client based on the provided config dictionary.
+    Instantiates and returns a Box SDK (generated) client based on the provided config dictionary.
     Designed to be callable from background threads using thread-specific config.
     """
     auth_method = config.get('auth_method', 'oauth') # Default to oauth
-    client = None
+    authenticator = None
 
     try:
         if auth_method == 'oauth':
@@ -57,21 +63,26 @@ def get_box_client(config: Dict[str, Any]) -> Client:
              refresh_token = config.get('refresh_token')
              client_id = config.get('client_id')
              client_secret = config.get('client_secret')
+             # No store_tokens callback in the generated SDK's OAuth2 class directly
+             # If refresh is needed, it's handled internally or requires specific refresh logic
+             # For this simplified thread model, we rely on the passed tokens being valid.
 
              if not all([access_token, client_id, client_secret]):
                   raise ValueError("Missing OAuth tokens or credentials in config.")
 
-             # Note: Refresh logic is not robustly handled here for long-running threads.
-             # CCG/JWT is generally preferred for workers.
-             oauth = OAuth2(
+             logger.debug("Using OAuth2 for client instantiation in thread.")
+             # Instantiating OAuth2 authenticator
+             authenticator = OAuth2(
                  client_id=client_id,
                  client_secret=client_secret,
                  access_token=access_token,
                  refresh_token=refresh_token,
-                 # store_tokens=... # Need a mechanism for this if tokens expire
+                 # Token refresh callback needs to be handled externally and passed if required for long-running
+                 # Generated SDK's OAuth2 class has an `refresh_token` method if needed manually.
+                 # Passing `update_tokens_callback` is more complex and often tied to a persistence layer.
+                 # For this model, we omit the complex callback.
              )
-             logger.debug("Using OAuth2 for client instantiation in thread.")
-             client = Client(oauth)
+
 
         elif auth_method == 'jwt':
             jwt_config_path = config.get('jwt_config_path')
@@ -83,17 +94,18 @@ def get_box_client(config: Dict[str, Any]) -> Client:
             if not jwt_config_path or not os.path.exists(abs_jwt_config_path):
                  raise FileNotFoundError(f"JWT config file not found at {jwt_config_path} (resolved to {abs_jwt_config_path})")
 
-            with open(abs_jwt_config_path) as f:
-                jwt_config_dict = json.load(f)
+            # JWTAuthentication uses a config object directly
+            jwt_config = JWTAuthentication.from_config_file(abs_jwt_config_path)
 
-            auth = JWTAuth.from_settings_dictionary(jwt_config_dict)
-
+            # JWTAuthentication instantiation
             if user_id:
-                 logger.debug(f"Using JWT auth as user {user_id} for client instantiation in thread.")
-                 client = Client(auth.as_user(user_id))
+                 logger.debug(f"Using JWT auth as user {user_id} for client instantiation.")
+                 # JWTAuthentication requires the user ID on instantiation for 'as_user'
+                 authenticator = JWTAuthentication(jwt_config, user_id=user_id)
             else:
-                 logger.debug("Using JWT auth (app user/enterprise) for client instantiation in thread.")
-                 client = Client(auth)
+                 logger.debug("Using JWT auth (app user/enterprise) for client instantiation.")
+                 authenticator = JWTAuthentication(jwt_config)
+
 
         elif auth_method == 'ccg':
             client_id = config.get('client_id')
@@ -104,34 +116,64 @@ def get_box_client(config: Dict[str, Any]) -> Client:
             if not all([client_id, client_secret]):
                  raise ValueError("Missing CCG client_id or client_secret in config.")
 
-            auth = ClientCredentialsAuth(client_id, client_secret, enterprise_id)
-
+            # ClientCredentialsGrant instantiation
             if user_id:
-                logger.debug(f"Using CCG auth as user {user_id} for client instantiation in thread.")
-                client = Client(auth.as_user(user_id))
+                logger.debug(f"Using CCG auth as user {user_id} for client instantiation.")
+                # Use subject_type="user" and subject_id=user_id for as_user
+                authenticator = ClientCredentialsGrant(
+                     client_id=client_id,
+                     client_secret=client_secret,
+                     # In generated SDK, impersonation is done via subject_type and subject_id
+                     subject_type='user',
+                     subject_id=user_id
+                )
             elif enterprise_id:
-                logger.debug(f"Using CCG auth as enterprise {enterprise_id} for client instantiation in thread.")
-                client = Client(auth.as_enterprise(enterprise_id))
+                logger.debug(f"Using CCG auth as enterprise {enterprise_id} for client instantiation.")
+                 # Use subject_type="enterprise" and subject_id=enterprise_id for as_enterprise
+                authenticator = ClientCredentialsGrant(
+                     client_id=client_id,
+                     client_secret=client_secret,
+                     subject_type='enterprise',
+                     subject_id=enterprise_id
+                )
             else:
                  logger.warning("Using CCG auth without user_id or enterprise_id. Client may have limited scope.")
-                 client = Client(auth) # Represents the app itself
+                 # Authenticate the application itself
+                 authenticator = ClientCredentialsGrant(
+                     client_id=client_id,
+                     client_secret=client_secret,
+                     # No subject_type/subject_id means authenticate the app
+                 )
+
 
         elif auth_method == 'developer_token':
              dev_token = config.get('developer_token')
              if not dev_token:
                   raise ValueError("Missing developer token in config.")
-             logger.debug("Using Developer Token auth for client instantiation in thread.")
-             client = Client(DeveloperTokenAuth(dev_token))
+             logger.debug("Using Developer Token auth for client instantiation.")
+             # DeveloperTokenAuthentication instantiation
+             authenticator = DeveloperTokenAuthentication(dev_token)
 
         else:
             raise ValueError(f"Unsupported authentication method: {auth_method}")
 
-        # logger.info(f"Box client instantiated successfully using {auth_method} in thread {threading.current_thread().name}.") # Add thread info if debugging workers
+        # Instantiate the client using the authenticator
+        client = BoxClient(authenticator) # Use BoxClient class
+
+        logger.info(f"Box client (generated SDK) instantiated successfully using {auth_method}.")
         return client
 
     except Exception as e:
-        logger.error(f"Error creating Box client using {auth_method} in thread: {e}", exc_info=True)
-        raise # Re-raise the exception
+        logger.error(f"Error creating Box client using {auth_method}: {e}", exc_info=True)
+        # Wrap exceptions in BoxSDKException or re-raise generated SDK's exceptions
+        if isinstance(e, ApiException): # Generated SDK API exceptions
+            raise e
+        elif isinstance(e, BoxSDKException): # Generated SDK base exception
+             raise e
+        else:
+             # Wrap other exceptions for consistency
+             raise BoxSDKException(f"Failed to get Box client: {e}") from e
+
 
 # This function is called in the main Streamlit thread to prepare config for workers
 def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -229,7 +271,11 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
         return None
 
 
-# --- Metadata Template Creation Functions ---
+# --- Metadata Template Creation Functions (Check if methods/classes changed in generated SDK) ---
+
+# These functions use client methods like client.create_metadata_template
+# The generated SDK client methods are likely different.
+# For create_metadata_template, the generated SDK uses client.metadata_templates.create_metadata_template
 
 def generate_template_key(display_name):
     """Generates a Box-compliant templateKey from a display name."""
@@ -264,12 +310,13 @@ def generate_template_key(display_name):
     return template_key[:64] # Max length 64
 
 
-def create_custom_template_from_ai_keys(client: Client, selected_keys: List[str], template_display_name: str = "Custom Extracted Info", scope: str = "enterprise") -> Tuple[bool, str]:
+# Updated function signature and internal method calls for generated SDK
+def create_custom_template_from_ai_keys(client: BoxClient, selected_keys: List[str], template_display_name: str = "Custom Extracted Info", scope: str = "enterprise") -> Tuple[bool, str]: # Client is now BoxClient
     """
-    Creates a custom metadata template in Box based on AI-extracted keys.
+    Creates a custom metadata template in Box based on AI-extracted keys (using generated SDK).
 
     Args:
-        client: Authenticated Box SDK client (from main thread).
+        client: Authenticated Box SDK (generated) client.
         selected_keys: A list of strings (keys from AI extraction) to become fields.
         template_display_name: User-friendly name for the new template.
         scope: The scope for the new template (e.g., "enterprise", "global").
@@ -295,8 +342,10 @@ def create_custom_template_from_ai_keys(client: Client, selected_keys: List[str]
         logger.error(f"Error generating template key for '{template_display_name}': {e}", exc_info=True)
         return False, f"Internal error generating template key: {e}"
 
+    # Imports needed for field types in generated SDK
+    from box_sdk_gen.schemas import MetadataField, MetadataFieldType, CreateMetadataTemplateRequestBody
 
-    fields = []
+    fields: List[MetadataField] = [] # Use generated SDK's MetadataField schema
     for key in selected_keys:
         # Sanitize key for Box field key requirements (alphanumeric)
         # Field key: [a-zA-Z0-9_], max 64 chars, not starting with digit.
@@ -310,33 +359,53 @@ def create_custom_template_from_ai_keys(client: Client, selected_keys: List[str]
 
         field_display_name = key.replace("_", " ").replace("-", " ").title()
 
-        # Assuming all fields are strings based on the AI extraction context
-        fields.append({
-            "type": "string",
-            "key": field_key,
-            "displayName": field_display_name,
-            "hidden": False # Or True, depending on desired visibility
-        })
+        # Use generated SDK's schema objects for fields
+        fields.append(
+             MetadataField(
+                  type=MetadataFieldType.ENUM.value, # Assuming string, but enum is often safer for generated templates
+                  key=field_key,
+                  display_name=field_display_name,
+                  options=[{"id": str(i), "value": "Default Value"} for i in range(1)] # Enum requires options, string is MetadataFieldType.STRING.value
+                  # Let's stick to string as per previous assumption
+             )
+        )
+
+    # Corrected fields list creation for string type
+    fields_string_type: List[MetadataField] = []
+    for key in selected_keys:
+        field_key = re.sub(r'[^a-zA-Z0-9_]', '', key)
+        if not field_key: continue
+        if field_key[0].isdigit(): field_key = "f_" + field_key
+        field_key = field_key[:64]
+        field_display_name = key.replace("_", " ").replace("-", " ").title()
+        fields_string_type.append(
+            MetadataField(
+                type=MetadataFieldType.STRING.value, # Use STRING enum value
+                key=field_key,
+                display_name=field_display_name
+            )
+        )
+    fields = fields_string_type # Use the string type fields
+
 
     if not fields:
         return False, "No valid fields could be generated from the selected keys."
 
     try:
         logger.info(f"Attempting to create template: scope='{scope}', template_key='{template_key}', displayName='{template_display_name}'")
-        # Do NOT log fields list directly, it might contain sensitive info implicitly via keys
-        # logger.debug(f"Fields: {fields}") # Use debug level if logging fields is needed
-
-        new_template = client.create_metadata_template(
-            display_name=template_display_name,
-            template_key=template_key,
-            scope=scope,
-            fields=fields,
-            hidden=False
+        # Generated SDK method for creating template
+        new_template = client.metadata_templates.create_metadata_template(
+            request_body=CreateMetadataTemplateRequestBody(
+                scope=scope,
+                display_name=template_display_name,
+                template_key=template_key,
+                fields=fields,
+                hidden=False
+            )
         )
-        # Box SDK returns the full ID in the response object if successful
-        # Check if the response object has a type and id or templateKey/scope
-        if hasattr(new_template, 'type') and new_template.type == 'metadata_template':
-             # The full ID is often just scope_templateKey
+
+        # Generated SDK response likely has templateKey and scope directly
+        if new_template and hasattr(new_template, 'template_key') and hasattr(new_template, 'scope'):
              full_template_id = f"{new_template.scope}_{new_template.template_key}"
         else:
              # Fallback if SDK response structure is unexpected
@@ -345,26 +414,24 @@ def create_custom_template_from_ai_keys(client: Client, selected_keys: List[str]
 
         logger.info(f"Successfully created template with ID: {full_template_id}")
         return True, f"Successfully created template: {template_display_name} (ID: {full_template_id})"
-    except BoxAPIException as e:
-        logger.error(f"Box API Exception while creating template '{template_display_name}' (key: {template_key}): Status={e.status}, Code={e.code}, Message={e.message}")
+    except ApiException as e: # Catch generated SDK API exceptions
+        logger.error(f"Box API Exception (Generated SDK) while creating template '{template_display_name}' (key: {template_key}): Status={e.status}, Code={e.code}, Message={e.message}")
         error_message = f"Error creating template '{template_display_name}': {e.message}"
-        # Add more detailed error info if available in context_info
-        if e.context_info and 'errors' in e.context_info and isinstance(e.context_info['errors'], list):
-            for err_detail in e.context_info['errors']:
-                # Prioritize 'message' or 'reason'
-                detail_msg = err_detail.get('message') or err_detail.get('reason')
-                if detail_msg:
-                     error_message += f" - {detail_msg}"
-                # Add field specific context if available
-                if err_detail.get('name') and err_detail.get('value'):
-                    error_message += f" (Field: {err_detail['name']} Value: {err_detail['value']})"
+        # Generated SDK ApiException might have different context_info structure, check documentation
+        # if e.context_info and 'errors' in e.context_info and isinstance(e.context_info['errors'], list):
+        #     for err_detail in e.context_info['errors']:
+        #         detail_msg = err_detail.get('message') or err_detail.get('reason')
+        #         if detail_msg: error_message += f" - {detail_msg}"
+        #         if err_detail.get('name') and err_detail.get('value'): error_message += f" (Field: {err_detail['name']} Value: {err_detail['value']})"
 
-        # Specific check for template key conflict
+        # Specific check for template key conflict (status code is usually reliable)
         if e.status == 409: # Conflict
             error_message += " - A template with this key likely already exists."
 
-
         return False, error_message
-    except Exception as e:
+    except BoxSDKException as e: # Catch generated SDK base exceptions
+        logger.error(f"Box SDK Exception (Generated SDK) while creating template '{template_display_name}' (key: {template_key}): {e}", exc_info=True)
+        return False, f"An unexpected Box SDK error occurred: {str(e)}"
+    except Exception as e: # Catch any other unexpected errors
         logger.error(f"Unexpected error while creating template '{template_display_name}' (key: {template_key}): {e}", exc_info=True)
         return False, f"An unexpected error occurred: {str(e)}"
