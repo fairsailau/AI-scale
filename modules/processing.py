@@ -55,7 +55,7 @@ def get_template_id_for_file_processing(
             return global_structured_template_id
         logger.warning(f'File ID {file_id}: No template ID found for structured extraction (no mapping for type {file_doc_type} and no global template).')
         return None
-    elif extraction_method == \'freeform\':
+    elif extraction_method == 'freeform':
         # Freeform doesn\'t strictly need a template ID for the AI *call*,
         # but the concept exists for where the *result* might eventually go.
         # The worker task uses "freeform_prompt_based" as an internal identifier.
