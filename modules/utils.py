@@ -10,7 +10,13 @@ import json
 import streamlit as st
 # Correct import paths for boxsdk<=3.14.0 auth classes
 from boxsdk import Client, OAuth2, JWTAuth # Import these from top level
-# Try importing these specifically from boxsdk.auth for versions > 3.9.0 but <= 3.14.0
+
+# Corrected logging format string - must be a single line
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# DEFINE LOGGER HERE, BEFORE IT'S USED IN THE TRY/EXCEPT BLOCK
+logger = logging.getLogger(__name__)
+
+# Try importing ClientCredentialsAuth and DeveloperTokenAuth specifically from boxsdk.auth for versions > 3.9.0 but <= 3.14.0
 # If this fails, it indicates they might be elsewhere or the install is still problematic.
 try:
     from boxsdk.auth import ClientCredentialsAuth, DeveloperTokenAuth # Attempt import from boxsdk.auth
@@ -26,11 +32,12 @@ from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
 from typing import Dict, Any, Optional, List, Tuple
 
-# Corrected logging format string - must be a single line
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 # --- Authentication and Client Functions ---
+# ... (rest of the functions like load_config, get_box_client, get_box_config_for_worker)
+# These functions remain the same as in the previous step.
+# (Copy the rest of the functions from the code block I provided in the previous response)
+# ...
 
 def load_config(config_file='config.ini'):
     """Loads configuration from config.ini."""
@@ -45,7 +52,7 @@ def load_config(config_file='config.ini'):
              return None
         return config
     else:
-        logger.error(f"Configuration file not found: {config_file}")
+        logger.error(f"Configuration file not found: {config_path}")
         return None
 
 def get_box_client(config: Dict[str, Any]) -> Client:
@@ -137,7 +144,6 @@ def get_box_client(config: Dict[str, Any]) -> Client:
         logger.error(f"Error creating classic Box client using {auth_method} in thread: {e}", exc_info=True)
         raise # Re-raise the exception
 
-# This function is called in the main Streamlit thread to prepare config for workers
 def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Gathers necessary Box SDK configuration from session state and config.ini
