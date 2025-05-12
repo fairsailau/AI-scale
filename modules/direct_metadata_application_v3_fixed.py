@@ -1,405 +1,426 @@
+#!/usr/bin/env python
+"""
+Handles the application of extracted metadata to files in Box.
+Refactored to support applying metadata to single files
+as independent tasks for concurrent processing.
+"""
+
 import streamlit as st
 import logging
 import json
+import time # For UI refresh during background tasks (no longer used for polling threads)
+import concurrent.futures # For concurrent processing
 from boxsdk import Client, exception
 from boxsdk.object.metadata import MetadataUpdate
 from dateutil import parser
 from datetime import timezone
+from typing import Dict, Any, Tuple, List, Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Assume utils is in .utils
+from . import utils # Import utils module to use get_box_client
+
+logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
 logger = logging.getLogger(__name__)
 
-if 'template_schema_cache' not in st.session_state:
+# --- Helper Functions ---
+
+# IMPORTANT: This function should ONLY be called from the main Streamlit thread
+# It uses st.session_state for caching.
+if \'template_schema_cache\' not in st.session_state:
     st.session_state.template_schema_cache = {}
 
-class ConversionError(ValueError):
-    pass
-
-def get_template_schema(client, full_scope, template_key):
-    cache_key = f'{full_scope}_{template_key}'
+def get_template_schema(client: Client, full_scope: str, template_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches and caches template schema from Box.
+    **IMPORTANT**: Call this only from the main Streamlit thread.
+    """
+    cache_key = f\'{full_scope}_{template_key}\'
+    # Access st.session_state is SAFE here because this is assumed to be called
+    # ONLY from the main Streamlit thread before background tasks start.
     if cache_key in st.session_state.template_schema_cache:
-        logger.info(f'Using cached schema for {full_scope}/{template_key}')
-        # Return a copy to prevent modification of cached mutable object if schema is None or {}
+        logger.info(f"SF_APPLY: Using cached schema for {full_scope}/{template_key}")
         cached_schema = st.session_state.template_schema_cache[cache_key]
+        # Return a copy to prevent modifications in thread (though threads won't call this)
         return cached_schema.copy() if isinstance(cached_schema, dict) else cached_schema
-
     try:
-        logger.info(f'Fetching template schema for {full_scope}/{template_key}')
+        logger.info(f"SF_APPLY: Fetching template schema for {full_scope}/{template_key}")
         template = client.metadata_template(full_scope, template_key).get()
-        if template and hasattr(template, 'fields') and template.fields:
-            schema_map = {field['key']: field['type'] for field in template.fields}
+        if template and hasattr(template, \'fields\') and template.fields:
+            schema_map = {
+                field[\'key\']: {\'type\': field[\'type\'], \'displayName\': field.get(\'displayName\', field[\'key\'])}
+                for field in template.fields
+            }
+            # Writing to st.session_state is SAFE here (main thread)
             st.session_state.template_schema_cache[cache_key] = schema_map
-            logger.info(f'Successfully fetched and cached schema for {full_scope}/{template_key}')
-            return schema_map.copy() # Return a copy
+            logger.info(f"SF_APPLY: Successfully fetched and cached schema for {full_scope}/{template_key}")
+            return schema_map.copy()
         else:
-            logger.warning(f'Template {full_scope}/{template_key} found but has no fields or is invalid.')
-            st.session_state.template_schema_cache[cache_key] = {}
+            logger.warning(f"SF_APPLY: Template {full_scope}/{template_key} found but has no fields or is invalid.")
+            # Writing to st.session_state is SAFE here (main thread)
+            st.session_state.template_schema_cache[cache_key] = {} # Cache empty schema
             return {}
     except exception.BoxAPIException as e:
-        logger.error(f'Box API Error fetching template schema for {full_scope}/{template_key}: Status={e.status}, Code={e.code}, Message={e.message}')
-        st.session_state.template_schema_cache[cache_key] = {"error_status": e.status, "error_code": e.code} # Store error info
-        return None
+        logger.error(f"SF_APPLY: Box API Error fetching template schema for {full_scope}/{template_key}: Status={e.status}, Code={e.code}, Message={e.message}")
+        # Writing to st.session_state is SAFE here (main thread)
+        # Store specific error info in cache so the task function can give a specific message
+        st.session_state.template_schema_cache[cache_key] = {"error_status": e.status, "error_code": e.code, "message": e.message}
+        return None # Return None on error
     except Exception as e:
-        logger.exception(f'Unexpected error fetching template schema for {full_scope}/{template_key}: {e}')
-        st.session_state.template_schema_cache[cache_key] = {"error_status": "general_error"} # Store error info
-        return None
+        logger.exception(f"SF_APPLY: Unexpected error fetching template schema for {full_scope}/{template_key}: {e}")
+         # Writing to st.session_state is SAFE here (main thread)
+        st.session_state.template_schema_cache[cache_key] = {"error_status": "general_error", "message": str(e)}
+        return None # Return None on error
 
-def convert_value_for_template(key, value, field_type):
+# Keep other helper functions like convert_value_for_template, flatten_metadata_for_template etc.
+# as they were in your snippet, ensuring they do NOT access st.session_state or globals.
+# They are assumed to be pure functions or use only passed arguments.
+
+def convert_value_for_template(key: str, value: Any, field_type: str) -> Any:
+    """Converts a value to the type specified by the Box metadata template field."""
     if value is None:
         return None
     original_value_repr = repr(value)
     try:
-        if field_type == 'float':
+        if field_type == \'float\':
             if isinstance(value, str):
-                cleaned_value = value.replace('$', '').replace(',', '')
-                try:
-                    return float(cleaned_value)
-                except ValueError:
-                    raise ConversionError(f"Could not convert string '{value}' to float for key '{key}'.")
-            elif isinstance(value, (int, float)):
-                return float(value)
-            else:
-                raise ConversionError(f"Value {original_value_repr} for key '{key}' is not a string or number, cannot convert to float.")
-        elif field_type == 'date':
+                cleaned_value = value.replace(\'$\', \'\').replace(\\,\', \'\').strip() # Added strip
+                try: return float(cleaned_value)
+                except ValueError: raise ConversionError(f"Could not convert string `{value}` to float for key `{key}`.")
+            elif isinstance(value, (int, float)): return float(value)
+            else: raise ConversionError(f"Value {original_value_repr} for key `{key}` is not a string or number.")
+        elif field_type == \'date\':
             if isinstance(value, str):
                 try:
+                    # Handle common date formats, ensure timezone-aware UTC
                     dt = parser.parse(value)
-                    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    else:
-                        dt = dt.astimezone(timezone.utc)
-                    return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
-                except (parser.ParserError, ValueError) as e:
-                    raise ConversionError(f"Could not parse date string '{value}' for key '{key}': {e}.")
-            else:
-                raise ConversionError(f"Value {original_value_repr} for key '{key}' is not a string, cannot convert to date.")
-        elif field_type == 'string' or field_type == 'enum':
-            if not isinstance(value, str):
-                logger.info(f"Converting value {original_value_repr} to string for key '{key}' (type {field_type}).")
+                    dt = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                    return dt.strftime(\'%Y-%m-%dT%H:%M:%SZ\')
+                except (parser.ParserError, ValueError) as e: raise ConversionError(f"Could not parse date string `{value}` for key `{key}`: {e}.")
+            else: raise ConversionError(f"Value {original_value_repr} for key `{key}` is not a string.")
+        elif field_type in [\'string\', \'enum\']:
             return str(value)
-        elif field_type == 'multiSelect':
-            if isinstance(value, list):
-                converted_list = [str(item) for item in value]
-                if converted_list != value:
-                    logger.info(f"Converting items in list {original_value_repr} to string for key '{key}' (type multiSelect).")
-                return converted_list
+        elif field_type == \'multiSelect\':
+            if isinstance(value, list): return [str(item) for item in value]
             elif isinstance(value, str):
-                logger.info(f"Converting string value {original_value_repr} to list of strings for key '{key}' (type multiSelect).")
-                return [value]
+                try:
+                    # Attempt to parse a string list like '["item1", "item2"]'
+                    if value.strip().startswith(\'[\') and value.strip().endswith(\"]\'):
+                        parsed_list = json.loads(value)
+                        if isinstance(parsed_list, list): return [str(item).strip() for item in parsed_list if str(item).strip()] # Ensure list of strings, skip empty
+                except json.JSONDecodeError: pass # Not a JSON list string, treat as single item list below
+
+                # If not a list or not a valid JSON list string, treat as single item list
+                single_item = str(value).strip()
+                return [single_item] if single_item else [] # Return list containing single item, or empty list if empty string
             else:
-                logger.info(f"Converting value {original_value_repr} to list of strings for key '{key}' (type multiSelect).")
-                return [str(value)]
+                 # Handle other types by converting to string and putting in a list
+                 single_item = str(value).strip()
+                 return [single_item] if single_item else []
         else:
-            logger.warning(f"Unknown field type '{field_type}' for key '{key}'. Cannot convert value {original_value_repr}.")
-            raise ConversionError(f"Unknown field type '{field_type}' for key '{key}'.")
-    except ConversionError:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error converting value {original_value_repr} for key '{key}' (type {field_type}): {e}.")
-        raise ConversionError(f"Unexpected error converting value for key '{key}': {e}")
+            # For unknown types, attempt string conversion as a fallback, though this might fail Box validation later
+            logger.warning(f"Attempting to convert value for unknown field type `{field_type}` for key `{key}`.")
+            return str(value)
 
-def fix_metadata_format(metadata_values):
-    # This function might not be needed if AI response is already a flat dict of key-value pairs
-    # Keeping it for now in case some AI responses are structured differently.
-    formatted_metadata = {}
-    for key, value in metadata_values.items():
-        if isinstance(value, str) and value.startswith('{') and value.endswith('}'):
-            try:
-                json_compatible_str = value.replace("'", '"')
-                parsed_value = json.loads(json_compatible_str)
-                formatted_metadata[key] = parsed_value
-            except json.JSONDecodeError:
-                formatted_metadata[key] = value
-        else:
-            formatted_metadata[key] = value
-    return formatted_metadata
+    except ConversionError: raise # Re-raise our custom error
+    except Exception as e: raise ConversionError(f"Unexpected error converting value for key `{key}`: {e}")
 
-def flatten_metadata_for_template(metadata_values):
-    # This function might be redundant if metadata_values is already the direct AI response (flat dict)
-    flattened_metadata = {}
-    if 'answer' in metadata_values and isinstance(metadata_values['answer'], dict):
-        # This path is for AI responses where actual data is nested under 'answer'
-        for key, value_obj in metadata_values['answer'].items():
-            if isinstance(value_obj, dict) and 'value' in value_obj: # Box AI structured response format
-                flattened_metadata[key] = value_obj['value']
-            else: # Other direct key-value under answer
-                 flattened_metadata[key] = value_obj
-    else:
-        # Assumes metadata_values is already a flat dictionary of results (e.g., from freeform or already processed structured)
-        flattened_metadata = metadata_values.copy()
-    
-    # Remove common non-data keys from the AI response that shouldn't be applied as metadata
-    keys_to_remove = ['ai_agent_info', 'created_at', 'completion_reason', 'answer'] # 'answer' removed if it was the top-level container
-    for key in keys_to_remove:
-        if key in flattened_metadata:
-            del flattened_metadata[key]
-    return flattened_metadata
 
-def filter_confidence_fields(metadata_values):
-    # This function ensures only base keys are kept, removing their corresponding _confidence fields.
-    # E.g., if input is {'myKey': 'val', 'myKey_confidence': 'High'}, output is {'myKey': 'val'}
+def flatten_metadata_for_template(metadata_values: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensures metadata is a flat dictionary, handling common AI response structures."""
     if not isinstance(metadata_values, dict):
-        logger.warning(f"filter_confidence_fields received non-dict: {type(metadata_values)}. Returning empty dict.")
-        return {}
-    return {key: value for key, value in metadata_values.items() if not key.endswith('_confidence')}
+         logger.warning(f"flatten_metadata_for_template received non-dict input: {type(metadata_values)}")
+         return {} # Return empty dict if input is not a dict
 
-def parse_template_id(template_id_full):
-    if not template_id_full or '_' not in template_id_full:
-        raise ValueError(f'Invalid template ID format: {template_id_full}')
-    last_underscore_index = template_id_full.rfind('_')
-    if last_underscore_index == 0 or last_underscore_index == len(template_id_full) - 1:
-        raise ValueError(f'Template ID format incorrect, expected scope_templateKey: {template_id_full}')
-    full_scope = template_id_full[:last_underscore_index]
-    template_key = template_id_full[last_underscore_index + 1:]
-    if not full_scope.startswith('enterprise_') and full_scope != 'global':
-        if not full_scope == 'enterprise':
-            logger.warning(f"Scope format '{full_scope}' might be unexpected. Expected 'enterprise_...' or 'global'.")
-    logger.debug(f"Parsed template ID '{template_id_full}' -> full_scope='{full_scope}', template_key='{template_key}'")
-    return (full_scope, template_key)
+    flattened = {}
 
-def apply_metadata_to_file_direct_worker(client, file_id, file_name, raw_ai_response_values, full_scope, template_key):
-    logger.info(f"WORKER: Starting metadata application for file ID {file_id} ({file_name}) with template {full_scope}/{template_key}")
-    logger.debug(f"WORKER: Input raw_ai_response_values: {raw_ai_response_values}")
+    # Prioritize direct keys unless 'answer' looks like a structured AI response
+    is_structured_ai_response = isinstance(metadata_values.get('answer'), dict) and \
+                                all(isinstance(v, dict) and 'value' in v for v in metadata_values.get('answer', {}).values())
+
+    if is_structured_ai_response:
+        logger.debug("Detected structured AI response format with 'answer'. Flattening.")
+        for k, v_obj in metadata_values[\'answer\'].items():
+            # Only include keys that correspond to actual fields we expect to map
+            # (Further filtering will happen based on template schema)
+            flattened[k] = v_obj[\'value\']
+    else:
+        logger.debug("AI response does not look like structured 'answer' format. Using top-level keys.")
+        flattened = metadata_values.copy()
+
+    # Remove common AI or wrapper keys from the final flattened dict
+    keys_to_remove = [\'ai_agent_info\', \'created_at\', \'completion_reason\', \'answer\']
+    for k_rem in keys_to_remove:
+        flattened.pop(k_rem, None)
+
+    return flattened
+
+
+def filter_confidence_fields(metadata_values: Dict[str, Any]) -> Dict[str, Any]:
+    """Removes _confidence fields."""
+    if not isinstance(metadata_values, dict): return {}
+    return {k: v for k, v in metadata_values.items() if not k.endswith(\'_confidence\')}
+
+def parse_template_id(template_id_full: str) -> Tuple[str, str]:
+    """Parses a full template ID (e.g., "enterprise_12345_templateKey") into scope and templateKey."""
+    if not template_id_full or \'_\' not in template_id_full:
+        raise ValueError(f"Invalid template ID format: {template_id_full}.")
+
+    # Handle enterprise_<id>_<key> format
+    if template_id_full.startswith("enterprise_"):
+        parts = template_id_full.split(\'_\', 2) # Split at most twice
+        if len(parts) == 3 and parts[1].isdigit():
+             return f"{parts[0]}_{parts[1]}", parts[2] # scope = enterprise_id, key = templateKey
+        # Fallback for simpler enterprise_key? Unlikely in practice for enterprise
+        # return "enterprise", template_id_full.split(\'_\', 1)[1] if len(parts) > 1 else template_id_full
+
+    # Handle other standard formats like global_key
+    idx = template_id_full.rfind(\'_\')
+    if idx == -1 or idx == 0 or idx == len(template_id_full) - 1:
+         raise ValueError(f"Invalid template ID: {template_id_full}")
+
+    scope = template_id_full[:idx]
+    template_key = template_id_full[idx+1:]
+
+    # Basic validation
+    if not scope or not template_key:
+         raise ValueError(f"Invalid template ID parts derived from {template_id_full}")
+
+    return scope, template_key
+
+
+# --- Single File Metadata Application Worker (MODIFIED) ---
+
+MISSING_GLOBAL_PROPERTIES_ERROR_MSG = "The \'global/properties\' metadata template was not found. Please create it in Box Admin Console > Content > Metadata, or use the option on the View Results page to create a custom template from AI output."
+
+def apply_metadata_to_single_file_task(
+    box_config: Dict[str, Any], # NEW: Configuration for Box client
+    file_id: str,
+    file_name: str,
+    raw_ai_response_values: Dict[str, Any],
+    target_full_scope: str,
+    target_template_key: str,
+    template_schema: Optional[Dict[str, Any]] # NEW: Pass pre-fetched schema (or error info)
+) -> Tuple[str, bool, str]: # Returns (file_id, success_boolean, message_string)
+    """
+    Applies metadata to a single file in a background thread.
+    Accepts box_config and pre-fetched schema/schema error info.
+    """
+    template_identifier = f"{target_full_scope}/{target_template_key}"
+    logger.info(f"TASK_APPLY: Starting for {file_name} (ID: {file_id}), template {template_identifier}")
+
+    # Create Box client instance for this thread
+    try:
+        client = utils.get_box_client(box_config)
+    except Exception as e:
+        err = f"TASK_APPLY: Failed to create Box client for file {file_name} (ID: {file_id}): {e}"
+        logger.error(err, exc_info=True)
+        return file_id, False, err
 
     try:
-        # Step 1: Flatten the AI response if it's nested (e.g., under an 'answer' key from some AI models)
-        # The `ai_response` from `extraction_results` should already be the flat dict with _confidence fields.
-        # So, flatten_metadata_for_template might not be strictly needed here if input is always pre-flattened.
-        # However, calling it ensures robustness if the input structure varies.
-        potentially_flattened_metadata = flatten_metadata_for_template(raw_ai_response_values)
-        logger.debug(f"WORKER: Step 1 - Potentially flattened metadata: {potentially_flattened_metadata}")
-
-        # Step 2: Filter out the _confidence fields to get only base keys and their values.
-        # This is the dictionary we will use to match against the template schema.
-        metadata_for_schema_matching = filter_confidence_fields(potentially_flattened_metadata)
-        logger.debug(f"WORKER: Step 2 - Metadata for schema matching (no confidence fields): {metadata_for_schema_matching}")
-
-        template_schema = get_template_schema(client, full_scope, template_key)
+        # Handle cases where schema pre-fetch failed in main thread
         if template_schema is None:
-            # Check if the error was due to a 404 on global/properties
-            cached_error = st.session_state.template_schema_cache.get(f'{full_scope}_{template_key}')
-            if isinstance(cached_error, dict) and cached_error.get("error_status") == 404 and full_scope == "global" and template_key == "properties":
-                error_msg = f"The 'global/properties' metadata template was not found in your Box environment. This template is required for applying freeform extracted metadata. Please create it in Box Admin Console > Content > Metadata."
-            else:
-                error_msg = f'Could not retrieve template schema for {full_scope}/{template_key}. Cannot apply metadata to file {file_id} ({file_name}). Error details: {cached_error}'
-            logger.error(f"WORKER: {error_msg}")
-            return (False, error_msg)
-        
+             # Check if error info was stored in the schema cache entry during pre-fetch
+             # We can't access st.session_state here, but the calling code *might*
+             # have passed a dict containing error info instead of None if schema fetch failed.
+             # Let's assume the calling code passes None for simplicity if fetch failed.
+             # So if template_schema is None, it means pre-fetching failed.
+             # We can check if it was the specific global/properties case.
+             if target_full_scope == "global" and target_template_key == "properties":
+                 return file_id, False, MISSING_GLOBAL_PROPERTIES_ERROR_MSG
+             else:
+                  # If schema pre-fetch failed for another template
+                 return file_id, False, f"Could not retrieve schema for {template_identifier} (pre-fetch failed or template not found)."
+
+        # If schema object is a dict with error info (from pre-fetch failure)
+        if isinstance(template_schema, dict) and template_schema.get("error_status"):
+             err_status = template_schema.get("error_status")
+             err_code = template_schema.get("error_code")
+             err_msg_detail = template_schema.get("message", "Unknown pre-fetch error")
+             if err_status == 404 and target_full_scope == "global" and target_template_key == "properties":
+                  return file_id, False, MISSING_GLOBAL_PROPERTIES_ERROR_MSG
+             else:
+                  return file_id, False, f"Could not retrieve schema for {template_identifier} (Pre-fetch error: Status={err_status}, Code={err_code}, Msg={err_msg_detail})."
+
+
         if not template_schema:
-            logger.warning(f'WORKER: Template schema for {full_scope}/{template_key} is empty. No fields to apply for file {file_id} ({file_name}).')
-            return (True, 'Template schema is empty, nothing to apply.')
-        
-        logger.debug(f"WORKER: Template schema keys for {full_scope}/{template_key}: {list(template_schema.keys())}")
+             # Schema was fetched but was empty (template exists but has no fields)
+             return file_id, True, f"Template schema for {template_identifier} is empty, nothing to apply."
 
-        metadata_to_apply_final = {}
-        conversion_errors = []
-        for schema_key, field_type in template_schema.items():
-            if schema_key in metadata_for_schema_matching:
-                value_from_ai = metadata_for_schema_matching[schema_key]
+
+        # Proceed with metadata application
+        flat_metadata = flatten_metadata_for_template(raw_ai_response_values)
+        metadata_no_conf = filter_confidence_fields(flat_metadata)
+
+        final_md_ops = {}
+        conv_errors = []
+        for schema_k, field_detail in template_schema.items():
+            field_type = field_detail.get(\'type\')
+            if schema_k in metadata_no_conf:
                 try:
-                    converted_value = convert_value_for_template(schema_key, value_from_ai, field_type)
-                    if converted_value is not None:
-                        metadata_to_apply_final[schema_key] = converted_value
-                    else:
-                        logger.info(f"WORKER: Value for key '{schema_key}' is None after conversion. Skipping for file {file_id}.")
+                    conv_val = convert_value_for_template(schema_k, metadata_no_conf[schema_k], field_type)
+                    # Only add if conversion was successful and value is not None/empty string (for strings/multiselect)
+                    if conv_val is not None and not (isinstance(conv_val, str) and conv_val == "") and not (isinstance(conv_val, list) and not conv_val): # Check for empty string or empty list
+                         final_md_ops[schema_k] = conv_val
                 except ConversionError as e:
-                    error_msg = f"Conversion error for key '{schema_key}' (expected type '{field_type}', value: {repr(value_from_ai)}): {e}. Field skipped."
-                    logger.warning(f"WORKER: {error_msg}")
-                    conversion_errors.append(error_msg)
-                except Exception as e:
-                    error_msg = f"Unexpected error processing key '{schema_key}' for file {file_id}: {e}. Field skipped."
-                    logger.error(f"WORKER: {error_msg}")
-                    conversion_errors.append(error_msg)
-            else:
-                logger.info(f"WORKER: Template field '{schema_key}' not found in the processed extracted metadata for file {file_id}. Processed keys: {list(metadata_for_schema_matching.keys())}. Skipping field.")
-        
-        if not metadata_to_apply_final:
-            if conversion_errors:
-                warn_msg = f"Metadata application skipped for file {file_name}: No fields could be successfully converted. Errors: {'; '.join(conversion_errors)}"
-                logger.warning(f"WORKER: {warn_msg}")
-                return (False, f"No valid metadata fields to apply after conversion errors: {'; '.join(conversion_errors)}")
-            else:
-                info_msg = f'No matching metadata fields found or all values were None for file {file_name}. Nothing to apply.'
-                logger.info(f"WORKER: {info_msg}")
-                return (True, 'No matching fields to apply')
+                    conv_errors.append(f"Key `{schema_k}`: {e}")
+                except Exception as e: # Catch any other unexpected errors during conversion
+                    conv_errors.append(f"Key `{schema_k}`: Unexpected conversion error - {e}")
 
-        logger.info(f'WORKER: Attempting to apply metadata to file {file_id} using operations: {metadata_to_apply_final}')
+
+        if not final_md_ops:
+            base_msg = f"No mappable or valid metadata found to apply for {file_name} to template {template_identifier}."
+            if conv_errors: return file_id, False, f"{base_msg} Conversion errors: {'; '.join(conv_errors)}"
+            return file_id, True, base_msg # Success if no metadata to apply (might be intentional)
+
+        # Use the client created in THIS thread
+        md_instance = client.file(file_id).metadata(scope=target_full_scope, template=target_template_key)
         try:
-            metadata_instance = client.file(file_id).metadata(scope=full_scope, template=template_key)
-            try:
-                existing_data = metadata_instance.get() # Check if metadata instance exists
-                logger.info(f'WORKER: File ID {file_id}: Existing metadata found for {full_scope}/{template_key}. Updating.')
-                md_update = MetadataUpdate()
-                for key_to_update, value_to_update in metadata_to_apply_final.items():
-                    md_update.add_update(MetadataUpdate.OP_REPLACE, f"/{key_to_update}", value_to_update)
-                
-                if md_update.get_updates_list():
-                    updated_instance = metadata_instance.update(md_update)
-                    logger.info(f"WORKER: File ID {file_id}: Successfully updated metadata instance. ETag: {(updated_instance.etag if hasattr(updated_instance, 'etag') else 'N/A')}")
-                else:
-                    logger.info(f"WORKER: File ID {file_id}: No operations to apply for metadata update.")
-            except exception.BoxAPIException as e:
-                if e.status == 404: # Metadata instance does not exist, so create it
-                    logger.info(f'WORKER: File ID {file_id}: No existing metadata for {full_scope}/{template_key}. Creating.')
-                    created_instance = metadata_instance.create(metadata_to_apply_final)
-                    logger.info(f"WORKER: File ID {file_id}: Successfully created metadata instance. ETag: {(created_instance.etag if hasattr(created_instance, 'etag') else 'N/A')}")
-                else:
-                    raise # Re-raise other Box API exceptions
-            return (True, f'Metadata successfully applied to {file_name} using template {template_key}.')
-        except exception.BoxAPIException as e:
-            error_message = f'Box API Error applying metadata to {file_name} (ID: {file_id}) for template {full_scope}/{template_key}: Status={e.status}, Code={e.code}, Message={e.message}, Details: {e.context_info}'
-            logger.error(f"WORKER: {error_message}")
-            return (False, error_message)
-        except Exception as e:
-            error_message = f'Unexpected error applying metadata to {file_name} (ID: {file_id}): {e}'
-            logger.exception(f"WORKER: {error_message}")
-            return (False, error_message)
+            # Attempt to update existing metadata instance
+            update_ops = []
+            for k_up, v_up in final_md_ops.items():
+                # Box SDK update requires [test] for multi-select, not ["test"]
+                update_ops.append({"op": "replace", "path": f"/{k_up}", "value": v_up})
 
-    except Exception as e:
-        critical_error_msg = f'WORKER: Critical unexpected error during metadata application process for file {file_name} (ID: {file_id}): {str(e)}'
-        logger.exception(f"WORKER: {critical_error_msg}")
-        return (False, critical_error_msg)
+            if update_ops:
+                 # Using client.file(...).metadata(...).update(update_ops) is another way
+                 # Need to check which method is preferred/more reliable
+                 # Using the object method from your snippet:
+                 update_obj = MetadataUpdate()
+                 for k_up, v_up in final_md_ops.items(): update_obj.add_update(MetadataUpdate.OP_REPLACE, f"/{k_up}", v_up)
 
-def apply_metadata_direct():
-    st.title('Apply Metadata')
-    if not st.session_state.get('authenticated') or not st.session_state.get('client'):
-        st.error('Authentication required. Please login first.')
-        if st.button('Go to Login'):
-            st.session_state.current_page = 'Home'
-            st.rerun()
-        return
+                 if update_obj.get_updates_list():
+                      md_instance.update(update_obj)
+                      logger.info(f"TASK_APPLY: Successfully updated metadata for {file_name}")
+                      msg = f"Metadata successfully updated on {template_identifier}. {len(final_md_ops)} fields."
+                 else:
+                      msg = "No valid fields to update." # Should not happen if final_md_ops is not empty and update_ops was built
+            else:
+                 msg = "No update operations generated." # Should match "No mappable or valid metadata" above
 
-    client = st.session_state.client
-    selected_result_ids = st.session_state.get('selected_result_ids', [])
-    extraction_results_wrapper = st.session_state.get('extraction_results', {})
-    all_files_info = st.session_state.get('all_files_info', {})
-    global_fallback_template_id = st.session_state.metadata_config.get('template_id') 
+        except exception.BoxAPIException as e_box:
+            if e_box.status == 404: # Metadata instance not found, create new
+                md_instance.create(final_md_ops)
+                logger.info(f"TASK_APPLY: Successfully created metadata for {file_name}")
+                msg = f"Metadata successfully created on {template_identifier}. {len(final_md_ops)} fields."
+            else:
+                 # Re-raise the Box API exception if it's not a 404
+                 raise
 
-    if not selected_result_ids:
-        st.info("No results selected for metadata application. Please select results in the 'View Results' page or ensure files were processed.")
-        return
+        if conv_errors:
+            # Append conversion errors to the message
+            return file_id, True, f"{msg} Conversion errors occurred for some fields: {'; '.join(conv_errors)}"
 
-    if not extraction_results_wrapper or not any((file_id in extraction_results_wrapper for file_id in selected_result_ids)):
-        st.warning('Selected results are not found in the extraction data. Please re-process files or check selections.')
-        return
+        return file_id, True, msg
 
-    if 'application_state' not in st.session_state or not isinstance(st.session_state.application_state, dict):
-        st.session_state.application_state = {'is_applying': False, 'applied_files': 0, 'total_files_for_application': 0, 'results': {}, 'errors': {}, 'current_batch_progress': 0, 'total_batches': 0, 'current_batch_num': 0}
+    except exception.BoxAPIException as e_box_outer:
+        err = f"Box API Error for {file_name} (ID {file_id}) on {template_identifier}: Status={e_box_outer.status}, Code={e_box_outer.code}, Message={e_box_outer.message}"
+        # Add more detailed error info if available
+        if e_box_outer.context_info and 'errors' in e_box_outer.context_info and isinstance(e_box_outer.context_info['errors'], list):
+             for err_detail in e_box_outer.context_info['errors']:
+                  detail_msg = err_detail.get('message') or err_detail.get('reason')
+                  if detail_msg: err += f" - {detail_msg}"
+                  if err_detail.get('name') and err_detail.get('value'): err += f" (Field: {err_detail['name']} Value: {err_detail['value']})"
 
-    if not st.session_state.application_state.get('is_applying', False):
-        if st.button('Apply Selected Metadata', key='apply_selected_metadata_button_direct', use_container_width=True):
-            st.session_state.application_state['is_applying'] = True
-            st.session_state.application_state['applied_files'] = 0
-            st.session_state.application_state['total_files_for_application'] = len(selected_result_ids)
-            st.session_state.application_state['results'] = {}
-            st.session_state.application_state['errors'] = {}
-            st.rerun()
-        return
+        logger.error(f"TASK_APPLY: {err}", exc_info=True)
+        return file_id, False, err
+    except Exception as e_outer:
+        err = f"Unexpected error for {file_name} (ID {file_id}) on {template_identifier}: {str(e_outer)}"
+        logger.error(f"TASK_APPLY: {err}", exc_info=True)
+        return file_id, False, err
 
-    if st.session_state.application_state.get('is_applying', False):
-        total_files_to_apply = st.session_state.application_state['total_files_for_application']
-        files_processed_count = st.session_state.application_state['applied_files']
-        progress_bar = st.progress(0.0)
-        status_text = st.empty()
-        status_text.text(f"Preparing to apply metadata to {total_files_to_apply} files...")
+# --- Orchestration for background tasks (MODIFIED - collects results locally) ---
+def run_application_tasks_background(
+    files_to_apply: List[Dict[str,Any]],
+    max_workers: int,
+    box_config: Dict[str, Any], # Pass Box config
+    template_schemas_map: Dict[str, Dict[str, Any]] # Pass pre-fetched schemas (or error info dicts)
+) -> Dict[str, Tuple[bool, str]]: # Returns {file_id: (success, message)}
+    """
+    Orchestrates metadata application for multiple files using ThreadPoolExecutor.
+    Collects results and returns them. This function blocks until all tasks complete.
+    Each item in files_to_apply should be a dict:
+    {\'file_id\': str, \'file_name\': str, \'ai_response\': dict, \'template_id_for_application\': str}
+    """
+    logger.info(f"Starting concurrent metadata application for {len(files_to_apply)} files with {max_workers} workers...")
 
-        batch_size = st.session_state.metadata_config.get('batch_size', 5)
-        batches = [selected_result_ids[i:i + batch_size] for i in range(0, len(selected_result_ids), batch_size)]
-        st.session_state.application_state['total_batches'] = len(batches)
+    application_results_collected = {} # Use a local dict to collect results
 
-        for i, batch_chunk in enumerate(batches):
-            st.session_state.application_state['current_batch_num'] = i + 1
-            st.session_state.application_state['current_batch_progress'] = 0
-            
-            for file_id_in_batch_idx, file_id in enumerate(batch_chunk):
-                if not st.session_state.application_state.get('is_applying', False):
-                    logger.info('Metadata application cancelled by user.')
-                    break 
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file_id = {}
+        tasks_submitted_count = 0 # Track how many tasks were actually submitted
 
-                file_info = all_files_info.get(file_id, {'name': f'File ID {file_id}'})
-                file_name = file_info.get('name', f'File ID {file_id}')
-                
-                status_text.text(f"Batch {i+1}/{len(batches)}: Applying metadata to {file_name} ({file_id_in_batch_idx+1}/{len(batch_chunk)} of batch | Overall: {files_processed_count+1}/{total_files_to_apply})")
-                
-                result_data_wrapper = extraction_results_wrapper.get(file_id)
-                if not result_data_wrapper or 'ai_response' not in result_data_wrapper or 'template_id_used_for_extraction' not in result_data_wrapper:
-                    error_msg = f"Incomplete extraction data for file {file_name} (ID: {file_id}). Skipping application."
-                    logger.error(error_msg)
-                    st.session_state.application_state['errors'][file_id] = error_msg
-                    files_processed_count += 1
-                    st.session_state.application_state['applied_files'] = files_processed_count
-                    st.session_state.application_state['current_batch_progress'] = (file_id_in_batch_idx + 1) / len(batch_chunk)
-                    progress_bar.progress(files_processed_count / total_files_to_apply)
-                    continue
+        for task_data in files_to_apply:
+            file_id = task_data[\'file_id\']
+            file_name = task_data.get(\'file_name\', f\'File {file_id}\')
+            ai_response = task_data[\'ai_response\']
+            template_id_for_app = task_data.get(\'template_id_for_application\') # Can be None or "freeform_prompt_based"
 
-                actual_metadata_values_from_ai = result_data_wrapper['ai_response']
-                file_specific_template_id = result_data_wrapper['template_id_used_for_extraction']
-                
-                logger.info(f"APPLY_DIRECT: File ID {file_id}: Preparing to apply. Raw AI Response: {actual_metadata_values_from_ai}. Template ID for application: {file_specific_template_id}")
+            target_full_scope = "global"
+            target_template_key = "properties" # Default for freeform/unspecified
+            template_schema_for_task = None # This will hold the schema dict or error dict/None
 
-                if not file_specific_template_id:
-                    logger.warning(f"APPLY_DIRECT: File ID {file_id}: No specific template ID from extraction. Using global fallback: {global_fallback_template_id}")
-                    file_specific_template_id = global_fallback_template_id
-                
-                if not file_specific_template_id:
-                    error_msg = f"No template ID available for file {file_name} (ID: {file_id}). Skipping application."
-                    logger.error(f"APPLY_DIRECT: {error_msg}")
-                    st.session_state.application_state['errors'][file_id] = error_msg
-                    files_processed_count += 1
-                    st.session_state.application_state['applied_files'] = files_processed_count
-                    st.session_state.application_state['current_batch_progress'] = (file_id_in_batch_idx + 1) / len(batch_chunk)
-                    progress_bar.progress(files_processed_count / total_files_to_apply)
-                    continue
-
+            # Determine the target template and get the pre-fetched schema/error info
+            if template_id_for_app and template_id_for_app != "freeform_prompt_based":
                 try:
-                    full_scope, template_key = parse_template_id(file_specific_template_id)
-                    logger.info(f"APPLY_DIRECT: File ID {file_id}: Applying with scope {full_scope} and template key {template_key}")
-                    success, message = apply_metadata_to_file_direct_worker(
-                        client, file_id, file_name, actual_metadata_values_from_ai, full_scope, template_key
-                    )
-                    if success:
-                        st.session_state.application_state['results'][file_id] = message
-                    else:
-                        st.session_state.application_state['errors'][file_id] = message
-                except ValueError as ve: # From parse_template_id
-                    error_msg = f"Invalid template ID format '{file_specific_template_id}' for file {file_name}: {ve}. Skipping application."
-                    logger.error(f"APPLY_DIRECT: {error_msg}")
-                    st.session_state.application_state['errors'][file_id] = error_msg
-                except Exception as e_apply_worker:
-                    error_msg = f"Unexpected error during metadata application worker for {file_name}: {str(e_apply_worker)}"
-                    logger.error(f"APPLY_DIRECT: {error_msg}", exc_info=True)
-                    st.session_state.application_state['errors'][file_id] = error_msg
-                
-                files_processed_count += 1
-                st.session_state.application_state['applied_files'] = files_processed_count
-                st.session_state.application_state['current_batch_progress'] = (file_id_in_batch_idx + 1) / len(batch_chunk)
-                progress_bar.progress(files_processed_count / total_files_to_apply)
+                    target_full_scope, target_template_key = parse_template_id(template_id_for_app)
+                    schema_map_key = f\'{target_full_scope}_{target_template_key}\'
+                    template_schema_for_task = template_schemas_map.get(schema_map_key)
+                    # Note: template_schema_for_task can be a dict (the schema), {} (empty schema), or None (pre-fetch failed/404) or {error_status: ...}
 
-            if not st.session_state.application_state.get('is_applying', False):
-                break 
+                    if template_schema_for_task is None or (isinstance(template_schema_for_task, dict) and template_schema_for_task.get("error_status") == 404):
+                         # If pre-fetch resulted in None or a 404 error dict, make the task fail with a specific message
+                         error_msg = f"Metadata template {template_id_for_app} not found or pre-fetch failed."
+                         logger.warning(f"Skipping task for {file_name} due to missing/failed pre-fetch of template {template_id_for_app}.")
+                         application_results_collected[file_id] = (False, error_msg)
+                         continue # Skip submitting this task
 
-        st.session_state.application_state['is_applying'] = False
-        status_text.text(f"Metadata application process completed for {files_processed_count}/{total_files_to_apply} files.")
-        progress_bar.progress(1.0)
-        logger.info('Metadata application process finished.')
+                except ValueError as e_parse:
+                    err_msg = f"Invalid template ID format {template_id_for_app}: {e_parse}. Skipping task submission for {file_name}."
+                    logger.error(err_msg)
+                    application_results_collected[file_id] = (False, err_msg)
+                    continue # Skip submitting this task
 
-        if st.session_state.application_state['results']:
-            st.success('Successfully applied metadata to the following files:')
-            for fid, msg in st.session_state.application_state['results'].items():
-                fname = all_files_info.get(fid, {}).get('name', fid)
-                st.write(f'- {fname}: {msg}')
-        
-        if st.session_state.application_state['errors']:
-            st.error('Errors occurred while applying metadata to the following files:')
-            for fid, err_msg in st.session_state.application_state['errors'].items():
-                fname = all_files_info.get(fid, {}).get('name', fid)
-                st.write(f'- {fname}: {err_msg}')
-        
-        if st.button('Clear Application State and Go to View Results', key='clear_app_state_results_btn_direct'):
-            st.session_state.application_state = {}
-            st.session_state.current_page = 'View Results'
-            st.rerun()
-        if st.button('Clear Application State and Go Home', key='clear_app_state_home_btn_direct'):
-            st.session_state.application_state = {}
-            st.session_state.current_page = 'Home'
-            st.rerun()
+            elif template_id_for_app == "freeform_prompt_based" or not template_id_for_app:
+                 # Freeform defaults to global/properties. Check if schema is pre-fetched.
+                 schema_map_key = "global_properties"
+                 template_schema_for_task = template_schemas_map.get(schema_map_key)
+                 # Note: template_schema_for_task can be the schema dict, {} (empty), None, or {error_status: ...}
+
+                 if template_schema_for_task is None or (isinstance(template_schema_for_task, dict) and template_schema_for_task.get("error_status") == 404):
+                     # If pre-fetch resulted in None or a 404 error dict for global/properties, make the task fail specifically
+                     logger.warning(f"Skipping task for {file_name} due to missing/failed pre-fetch of template global/properties (freeform default).")
+                     application_results_collected[file_id] = (False, MISSING_GLOBAL_PROPERTIES_ERROR_MSG) # Use the standard message
+                     continue # Skip submitting this task
+
+
+            # If we reached here, the template schema/error info was found in the pre-fetched map
+            # and was not a 404 or None, so submit the task.
+            future = executor.submit(
+                apply_metadata_to_single_file_task,
+                box_config, # Pass config
+                file_id,
+                file_name,
+                ai_response,
+                target_full_scope,
+                target_template_key,
+                template_schema_for_task # Pass pre-fetched schema or non-404 error info dict
+            )
+            future_to_file_id[future] = file_id
+            tasks_submitted_count += 1
+
+        # This loop BLOCKS the calling thread (main Streamlit thread) until all futures are done
+        # Only iterate over futures that were actually submitted
+        for future in concurrent.futures.as_completed(future_to_file_id):
+            completed_file_id = future_to_file_id[future]
+            try:
+                f_id, success, message = future.result()
+                 # Collect results in the local dictionary
+                application_results_collected[f_id] = (success, message)
+                # logger.info(f"TASK_APPLY_RUNNER: Finished file ID {f_id}. Success: {success}. Message: {message}") # Verbose
+            except Exception as exc:
+                logger.error(f"TASK_APPLY_RUNNER: File ID {completed_file_id} generated an exception: {exc}", exc_info=True)
+                 # Collect error in the local dictionary
+                application_results_collected[completed_file_id] = (False, str(exc))
+
+    logger.info("Concurrent metadata application job finished.")
+    return application_results_collected # Return the collected results
