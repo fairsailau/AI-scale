@@ -11,7 +11,9 @@ import streamlit as st
 from boxsdk import Client, JWTAuth, OAuth2, ClientCredentialsAuth, DeveloperTokenAuth
 from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
+from typing import Dict, Any, Optional, List, Tuple
 
+# Corrected logging format string - must be a single line
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -135,12 +137,12 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
     """
     config = {}
     try:
-        auth_method = st_session_state.get(\'auth_method\')
+        auth_method = st_session_state.get('auth_method')
         if not auth_method:
              # Fallback to reading config.ini if method isn't in session state yet (e.g., at startup)
              cfg_ini = load_config()
-             if cfg_ini and \'box\' in cfg_ini:
-                 auth_method = cfg_ini[\'box\'].get(\'auth_method\')
+             if cfg_ini and 'box' in cfg_ini:
+                 auth_method = cfg_ini['box'].get('auth_method')
                  if not auth_method:
                      logger.error("Auth method not specified in config.ini or session state.")
                      return None
@@ -149,33 +151,33 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
                  logger.error("Could not determine auth method; config.ini not found or missing 'box' section.")
                  return None
 
-        config[\'auth_method\'] = auth_method
+        config['auth_method'] = auth_method
 
         # Collect credentials based on method - Prefer session state for tokens (OAuth)
         # but config.ini for static paths/secrets (JWT, CCG, Dev Token)
         cfg_ini = load_config() # Load config.ini to get static secrets/paths
 
-        if auth_method == \'oauth\':
-            if \'access_token\' in st_session_state and \'refresh_token\' in st_session_state \
-               and \'client_id\' in st_session_state and \'client_secret\' in st_session_state:
-                 config[\'access_token\'] = st_session_state[\'access_token\']
-                 config[\'refresh_token\'] = st_session_state[\'refresh_token\']
-                 config[\'client_id\'] = st_session_state[\'client_id\']
-                 config[\'client_secret\'] = st_session_state[\'client_secret\']
+        if auth_method == 'oauth':
+            if 'access_token' in st_session_state and 'refresh_token' in st_session_state \
+               and 'client_id' in st_session_state and 'client_secret' in st_session_state:
+                 config['access_token'] = st_session_state['access_token']
+                 config['refresh_token'] = st_session_state['refresh_token']
+                 config['client_id'] = st_session_state['client_id']
+                 config['client_secret'] = st_session_state['client_secret']
                  # logger.debug("Collected OAuth tokens from session state.") # Verbose
             else:
                  logger.error("OAuth tokens or credentials not found in session state for worker.")
                  return None
 
-        elif auth_method == \'jwt\':
-             if cfg_ini and \'box\' in cfg_ini and \'jwt_config_path\' in cfg_ini[\'box\']:
-                 config[\'jwt_config_path\'] = cfg_ini[\'box\'][\'jwt_config_path\']
+        elif auth_method == 'jwt':
+             if cfg_ini and 'box' in cfg_ini and 'jwt_config_path' in cfg_ini['box']:
+                 config['jwt_config_path'] = cfg_ini['box']['jwt_config_path']
                  # User ID can come from session state (if impersonating specific user) or config.ini
-                 if \'user_id\' in st_session_state and st_session_state[\'user_id\']:
-                     config[\'user_id\'] = st_session_state[\'user_id\']
+                 if 'user_id' in st_session_state and st_session_state['user_id']:
+                     config['user_id'] = st_session_state['user_id']
                      # logger.debug("Collected JWT user_id from session state.") # Verbose
-                 elif cfg_ini[\'box\'].get(\'user_id\'):
-                     config[\'user_id\'] = cfg_ini[\'box\'][\'user_id\']
+                 elif cfg_ini['box'].get('user_id'):
+                     config['user_id'] = cfg_ini['box']['user_id']
                      # logger.debug("Collected JWT user_id from config.ini.") # Verbose
                  else:
                      logger.debug("No JWT user_id specified.")
@@ -184,17 +186,17 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
                  logger.error("JWT config path not found in config.ini for worker.")
                  return None
 
-        elif auth_method == \'ccg\':
-            if cfg_ini and \'box\' in cfg_ini:
-                if \'client_id\' in cfg_ini[\'box\'] and \'client_secret\' in cfg_ini[\'box\']:
-                     config[\'client_id\'] = cfg_ini[\'box\'][\'client_id\']
-                     config[\'client_secret\'] = cfg_ini[\'box\'][\'client_secret\']
+        elif auth_method == 'ccg':
+            if cfg_ini and 'box' in cfg_ini:
+                if 'client_id' in cfg_ini['box'] and 'client_secret' in cfg_ini['box']:
+                     config['client_id'] = cfg_ini['box']['client_id']
+                     config['client_secret'] = cfg_ini['box']['client_secret']
                      # Enterprise ID and User ID can come from config.ini
-                     if \'enterprise_id\' in cfg_ini[\'box\']:
-                          config[\'enterprise_id\'] = cfg_ini[\'box\'][\'enterprise_id\']
+                     if 'enterprise_id' in cfg_ini['box']:
+                          config['enterprise_id'] = cfg_ini['box']['enterprise_id']
                           # logger.debug("Collected CCG enterprise_id from config.ini.") # Verbose
-                     if \'user_id\' in cfg_ini[\'box\']:
-                           config[\'user_id\'] = cfg_ini[\'box\'][\'user_id\']
+                     if 'user_id' in cfg_ini['box']:
+                           config['user_id'] = cfg_ini['box']['user_id']
                            # logger.debug("Collected CCG user_id from config.ini.") # Verbose
                 else:
                     logger.error("CCG client_id or client_secret not found in config.ini for worker.")
@@ -203,9 +205,9 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
                 logger.error("Box section not found in config.ini for CCG worker config.")
                 return None
 
-        elif auth_method == \'developer_token\':
-             if cfg_ini and \'box\' in cfg_ini and \'developer_token\' in cfg_ini[\'box\']:
-                  config[\'developer_token\'] = cfg_ini[\'box\'][\'developer_token\']
+        elif auth_method == 'developer_token':
+             if cfg_ini and 'box' in cfg_ini and 'developer_token' in cfg_ini['box']:
+                  config['developer_token'] = cfg_ini['box']['developer_token']
                   # logger.debug("Collected developer token from config.ini.") # Verbose
              else:
                   logger.error("Developer token not found in config.ini for worker.")
@@ -228,7 +230,7 @@ def generate_template_key(display_name):
     """Generates a Box-compliant templateKey from a display name."""
     # Remove special characters, replace spaces with underscores
     s = re.sub(r'[^a-zA-Z0-9_\s-]', '', display_name)
-    s = re.sub(r'[\s-]+', '_', s).strip(\'_\') # Also strip leading/trailing underscores
+    s = re.sub(r'[\s-]+', '_', s).strip('_') # Also strip leading/trailing underscores
 
     if not s:
         return "customTemplate" # Fallback 1
@@ -246,7 +248,7 @@ def generate_template_key(display_name):
 
     template_key = "".join(template_key_parts)
 
-    # Ensure it doesn\'t start with a digit (unlikely with current logic but safe)
+    # Ensure it doesn't start with a digit (unlikely with current logic but safe)
     if template_key and template_key[0].isdigit():
         template_key = "t" + template_key # Prepend a letter
 
