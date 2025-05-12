@@ -73,7 +73,7 @@ def process_files():
     Main Streamlit page function for processing files.
     Handles UI, configuration, and orchestrates background extraction (blocking).
     """
-    st.title(\'Process Files for AI Metadata Extraction\')
+    st.title('Process Files for AI Metadata Extraction')
 
     # Initialize session state variables (Keep these)
     if \'extraction_results\' not in st.session_state: st.session_state.extraction_results = {}
