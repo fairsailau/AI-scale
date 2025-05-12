@@ -8,8 +8,12 @@ import configparser
 import os
 import json
 import streamlit as st
+# Correct import paths for boxsdk v7+ auth classes
 from boxsdk import Client
-from boxsdk.auth import JWTAuth, OAuth2, ClientCredentialsAuth, DeveloperTokenAuth
+from boxsdk.auth import OAuth2 # Import OAuth2
+from boxsdk.auth import JWTAuth # Import JWTAuth
+from boxsdk.auth import ClientCredentialsAuth # Import ClientCredentialsAuth (CCG)
+from boxsdk.auth import DeveloperTokenAuth # Import DeveloperTokenAuth
 from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
 from typing import Dict, Any, Optional, List, Tuple
