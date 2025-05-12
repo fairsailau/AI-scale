@@ -8,36 +8,72 @@ import configparser
 import os
 import json
 import streamlit as st
-# Correct import paths for boxsdk<=3.14.0 auth classes
-from boxsdk import Client, OAuth2, JWTAuth # Import these from top level
+import sys # Import sys for path inspection
+from typing import Dict, Any, Optional, List, Tuple
+import time # Needed for fallback template key generation
 
 # Corrected logging format string - must be a single line
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-# DEFINE LOGGER HERE, BEFORE IT'S USED IN THE TRY/EXCEPT BLOCK
 logger = logging.getLogger(__name__)
 
-# Try importing ClientCredentialsAuth and DeveloperTokenAuth specifically from boxsdk.auth for versions > 3.9.0 but <= 3.14.0
-# If this fails, it indicates they might be elsewhere or the install is still problematic.
+# --- Diagnostic Prints BEFORE Box SDK Imports ---
+# These prints help diagnose what Python is seeing in the environment
+print(f"--- Debugging Box SDK Import ---")
+print(f"Python executable: {sys.executable}")
+print(f"sys.path: {sys.path}")
 try:
-    from boxsdk.auth import ClientCredentialsAuth, DeveloperTokenAuth # Attempt import from boxsdk.auth
-    logger.info("Imported ClientCredentialsAuth and DeveloperTokenAuth from boxsdk.auth")
-except ImportError:
-    # Fallback to importing from top level if boxsdk.auth import fails for these two specifically
-    logger.warning("Could not import ClientCredentialsAuth or DeveloperTokenAuth from boxsdk.auth. Attempting import from boxsdk top-level.")
-    from boxsdk import ClientCredentialsAuth, DeveloperTokenAuth # Fallback import
-    logger.info("Imported ClientCredentialsAuth and DeveloperTokenAuth from boxsdk top-level")
+    import boxsdk
+    print(f"Successfully imported boxsdk at: {boxsdk.__file__}")
+    print(f"boxsdk version: {getattr(boxsdk, '__version__', 'Version not found')}")
+    print(f"boxsdk.__dir__(): {dir(boxsdk)}")
+    # Check if boxsdk.auth exists and its contents
+    try:
+        import boxsdk.auth
+        print(f"Successfully imported boxsdk.auth at: {boxsdk.auth.__file__}")
+        print(f"boxsdk.auth.__dir__(): {dir(boxsdk.auth)}")
+    except ImportError:
+        print("Failed to import boxsdk.auth")
+except ImportError as e:
+    print(f"Failed to import boxsdk at all: {e}")
+
+print(f"--- Attempting Box SDK Auth Class Imports ---")
+# --- END Debugging Prints ---
 
 
-from boxsdk.exception import BoxAPIException
-import time # Needed for fallback template key generation
-from typing import Dict, Any, Optional, List, Tuple
+# Correct import paths for boxsdk<=3.14.0 auth classes
+# Based on the latest error, the simple top-level import is failing for CCG/DeveloperTokenAuth
+# Let's try importing the standard ones that seem to work and see if CCG/DevToken fail specifically.
+try:
+    # Try importing only the classes that seem to import fine first
+    from boxsdk import Client, OAuth2, JWTAuth
+    print("Imported Client, OAuth2, JWTAuth from boxsdk")
+except ImportError as e:
+    print(f"Initial import of Client, OAuth2, JWTAuth from boxsdk failed: {e}")
+    # Re-raise if these fundamental imports fail
+    raise
+
+# Now attempt the problematic ones with a specific try/except
+try:
+    # This is the line causing the latest error
+    from boxsdk import ClientCredentialsAuth, DeveloperTokenAuth
+    print("Imported ClientCredentialsAuth, DeveloperTokenAuth from boxsdk (top-level)")
+except ImportError as e:
+     # This is the error we are currently seeing
+     print(f"Fallback import of ClientCredentialsAuth, DeveloperTokenAuth from boxsdk failed: {e}")
+     # Try the boxsdk.auth path again just in case the *first* import was the issue, not the existence
+     try:
+          from boxsdk.auth import ClientCredentialsAuth, DeveloperTokenAuth
+          print("Imported ClientCredentialsAuth, DeveloperTokenAuth from boxsdk.auth (fallback)")
+     except ImportError as e2:
+          print(f"Import of ClientCredentialsAuth, DeveloperTokenAuth from boxsdk.auth ALSO failed: {e2}")
+          # If both fail, the package is likely broken or missing these classes in the installed version
+          print("FATAL: Could not import ClientCredentialsAuth or DeveloperTokenAuth from any expected location.")
+          raise ImportError("Could not import ClientCredentialsAuth or DeveloperTokenAuth. Please check your boxsdk installation (version 3.14.0).") from e2 # Re-raise a clear error
+
+from boxsdk.exception import BoxAPIException # Keep this import
 
 
 # --- Authentication and Client Functions ---
-# ... (rest of the functions like load_config, get_box_client, get_box_config_for_worker)
-# These functions remain the same as in the previous step.
-# (Copy the rest of the functions from the code block I provided in the previous response)
-# ...
 
 def load_config(config_file='config.ini'):
     """Loads configuration from config.ini."""
