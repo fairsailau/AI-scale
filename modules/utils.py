@@ -12,7 +12,7 @@ from boxsdk import Client, JWTAuth, OAuth2, ClientCredentialsAuth, DeveloperToke
 from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
 
-logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Authentication and Client Functions ---
