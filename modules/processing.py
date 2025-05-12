@@ -76,14 +76,14 @@ def process_files():
     st.title('Process Files for AI Metadata Extraction')
 
     # Initialize session state variables (Keep these)
-    if \'extraction_results\' not in st.session_state: st.session_state.extraction_results = {}
+    if 'extraction_results' not in st.session_state: st.session_state.extraction_results = {}
     # Document categorization is needed by the task, ensure its structure exists
-    if \'document_categorization\' not in st.session_state:
+    if 'document_categorization' not in st.session_state:
          st.session_state.document_categorization = {\'results\': {}, \'config\': {}, \'job_status\': {\'is_running\': False}} # Ensure job_status is initialized
 
     # New state variables for blocking job status
-    if \'extraction_job_running\' not in st.session_state: st.session_state.extraction_job_running = False
-    if \'extraction_job_summary\' not in st.session_state: st.session_state.extraction_job_summary = None
+    if 'extraction_job_running' not in st.session_state: st.session_state.extraction_job_running = False
+    if 'extraction_job_summary' not in st.session_state: st.session_state.extraction_job_summary = None
 
 
     try:
