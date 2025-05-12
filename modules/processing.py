@@ -14,7 +14,7 @@ from modules import utils
 from modules import processing # Assuming processing logic is here
 from modules import metadata_application # Assuming metadata application logic is here (for get_template_schema etc.)
 
-logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Single file processing function (Moved to modules/processing.py) ---
