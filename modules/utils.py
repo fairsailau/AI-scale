@@ -8,7 +8,8 @@ import configparser
 import os
 import json
 import streamlit as st
-from boxsdk import Client, JWTAuth, OAuth2, ClientCredentialsAuth, DeveloperTokenAuth
+from boxsdk import Client
+from boxsdk.auth import JWTAuth, OAuth2, ClientCredentialsAuth, DeveloperTokenAuth
 from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
 from typing import Dict, Any, Optional, List, Tuple
