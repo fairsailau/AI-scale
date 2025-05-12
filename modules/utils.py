@@ -8,12 +8,20 @@ import configparser
 import os
 import json
 import streamlit as st
-# Correct import paths for boxsdk v7+ auth classes (classic SDK)
-from boxsdk import Client, OAuth2, JWTAuth, ClientCredentialsAuth, DeveloperTokenAuth
-#from boxsdk.auth import OAuth2
-#from boxsdk.auth import JWTAuth
-#from boxsdk.auth import ClientCredentialsAuth # Ensure this exact name and path
-#from boxsdk.auth import DeveloperTokenAuth # Ensure this exact name and path
+# Correct import paths for boxsdk<=3.14.0 auth classes
+from boxsdk import Client, OAuth2, JWTAuth # Import these from top level
+# Try importing these specifically from boxsdk.auth for versions > 3.9.0 but <= 3.14.0
+# If this fails, it indicates they might be elsewhere or the install is still problematic.
+try:
+    from boxsdk.auth import ClientCredentialsAuth, DeveloperTokenAuth # Attempt import from boxsdk.auth
+    logger.info("Imported ClientCredentialsAuth and DeveloperTokenAuth from boxsdk.auth")
+except ImportError:
+    # Fallback to importing from top level if boxsdk.auth import fails for these two specifically
+    logger.warning("Could not import ClientCredentialsAuth or DeveloperTokenAuth from boxsdk.auth. Attempting import from boxsdk top-level.")
+    from boxsdk import ClientCredentialsAuth, DeveloperTokenAuth # Fallback import
+    logger.info("Imported ClientCredentialsAuth and DeveloperTokenAuth from boxsdk top-level")
+
+
 from boxsdk.exception import BoxAPIException
 import time # Needed for fallback template key generation
 from typing import Dict, Any, Optional, List, Tuple
@@ -37,7 +45,7 @@ def load_config(config_file='config.ini'):
              return None
         return config
     else:
-        logger.error(f"Configuration file not found: {config_path}")
+        logger.error(f"Configuration file not found: {config_file}")
         return None
 
 def get_box_client(config: Dict[str, Any]) -> Client:
@@ -166,7 +174,7 @@ def get_box_config_for_worker(st_session_state: Dict[str, Any]) -> Optional[Dict
                and 'client_id' in st.session_state and 'client_secret' in st.session_state:
                  config['access_token'] = st_session_state['access_token']
                  config['refresh_token'] = st_session_state['refresh_token']
-                 config['client_id'] = st_session_state['client_id']
+                 config['client_id'] = st.session_state['client_id']
                  config['client_secret'] = st.session_state['client_secret']
                  logger.debug("Collected OAuth tokens/creds from session state for worker.")
             else:
