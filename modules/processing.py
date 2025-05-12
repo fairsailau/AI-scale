@@ -12,8 +12,9 @@ import concurrent.futures # Used for ThreadPoolExecutor
 # Assume utils, processing, metadata_application are in modules/
 from modules import utils
 from modules import processing # Assuming processing logic is here
-from modules import metadata_application # Assuming metadata application logic is here (for get_template_schema etc.)
+from modules import direct_metadata_application_v3_fixed as metadata_application # Alias for clarity (used for get_template_schema, parse_template_id etc.)
 
+# Corrected logging format string - must be a single line
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ def get_template_id_for_file_processing(
         # but the concept exists for where the *result* might eventually go.
         # The worker task uses "freeform_prompt_based" as an internal identifier.
         # This function is for getting a template ID *before* the task for pre-fetching fields.
-        # For freeform, we don\'t pre-fetch fields, so this function isn't strictly
+        # For freeform, we don\'t pre-fetch fields, so this function isn\'t strictly
         # needed for the freeform case in the pre-fetching logic, but keep it for completeness.
         logger.debug(f"File ID {file_id}: Freeform extraction. No specific template ID used for pre-fetching fields.")
         return None # Return None as no template fields are needed for freeform AI call
@@ -73,13 +74,14 @@ def process_files():
     Main Streamlit page function for processing files.
     Handles UI, configuration, and orchestrates background extraction (blocking).
     """
+    # Corrected st.title string
     st.title('Process Files for AI Metadata Extraction')
 
-    # Initialize session state variables (Keep these)
+    # Corrected st.session_state initialization lines
     if 'extraction_results' not in st.session_state: st.session_state.extraction_results = {}
     # Document categorization is needed by the task, ensure its structure exists
     if 'document_categorization' not in st.session_state:
-         st.session_state.document_categorization = {\'results\': {}, \'config\': {}, \'job_status\': {\'is_running\': False}} # Ensure job_status is initialized
+         st.session_state.document_categorization = {'results': {}, 'config': {}, 'job_status': {'is_running': False}} # Ensure job_status is initialized
 
     # New state variables for blocking job status
     if 'extraction_job_running' not in st.session_state: st.session_state.extraction_job_running = False
@@ -88,34 +90,34 @@ def process_files():
 
     try:
         # Basic checks (Keep these)
-        if not st.session_state.get(\'authenticated\') or not st.session_state.get(\'client\'):
-            st.error(\'Please authenticate with Box first.\')
-            if st.button(\'Go to Login\'): st.session_state.current_page = \'Home\'; st.rerun()
+        if not st.session_state.get('authenticated') or not st.session_state.get('client'):
+            st.error('Please authenticate with Box first.')
+            if st.button('Go to Login'): st.session_state.current_page = 'Home'; st.rerun()
             return
 
-        if not st.session_state.get(\'selected_files\'):
-            st.warning(\'No files selected. Please select files in the File Browser first.\')
-            if st.button(\'Go to File Browser\'): st.session_state.current_page = \'File Browser\'; st.rerun()
+        if not st.session_state.get('selected_files'):
+            st.warning('No files selected. Please select files in the File Browser first.')
+            if st.button('Go to File Browser'): st.session_state.current_page = 'File Browser'; st.rerun()
             return
 
-        metadata_config_state = st.session_state.get(\'metadata_config\')
+        metadata_config_state = st.session_state.get('metadata_config')
         # Need categorization results for getting doc type for mapping
-        categorization_results = st.session_state.get(\'document_categorization\', {}).get(\'results\', {})
-        doc_type_mapping = st.session_state.get(\'document_type_to_template\', {})
+        categorization_results = st.session_state.get('document_categorization', {}).get('results', {})
+        doc_type_mapping = st.session_state.get('document_type_to_template', {})
 
         # Check if structured extraction is selected and if necessary configs are missing
-        is_structured = metadata_config_state.get(\'extraction_method\') == \'structured\'
-        global_structured_template_id = metadata_config_state.get(\'template_id\')
+        is_structured = metadata_config_state.get('extraction_method') == 'structured'
+        global_structured_template_id = metadata_config_state.get('template_id')
         has_any_mapping = any(doc_type_mapping.values()) # Check if the mapping dict has any non-empty values
 
         is_structured_incomplete = is_structured and not global_structured_template_id and not has_any_mapping
 
         if not metadata_config_state or is_structured_incomplete:
-            warning_msg = \'Metadata configuration is incomplete.\'
+            warning_msg = 'Metadata configuration is incomplete.'
             if is_structured:
-                 warning_msg += \' For structured extraction, please ensure a global template is selected or document types are mapped to templates.\'
+                 warning_msg += ' For structured extraction, please ensure a global template is selected or document types are mapped to templates.'
             st.warning(warning_msg)
-            if st.button(\'Go to Metadata Configuration\'): st.session_state.current_page = \'Metadata Configuration\'; st.rerun()
+            if st.button('Go to Metadata Configuration'): st.session_state.current_page = 'Metadata Configuration'; st.rerun()
             return
         # End Basic Checks
 
@@ -151,13 +153,13 @@ def process_files():
              # Add templates from doc type mapping that match selected files
              files_list = list(st.session_state.selected_files)
              for file_data in files_list:
-                 file_id = str(file_data[\'id\'])
-                 file_doc_type = categorization_results.get(file_id, {}).get(\'document_type\')
+                 file_id = str(file_data['id'])
+                 file_doc_type = categorization_results.get(file_id, {}).get('document_type')
                  mapped_tpl_id = get_template_id_for_file_processing(
                       file_id, file_doc_type, metadata_config_state, doc_type_mapping
                  )
                  if mapped_tpl_id and mapped_tpl_id != global_structured_template_id:
-                      # Only add mapped template if it\'s not the same as the global one
+                      # Only add mapped template if it's not the same as the global one
                       templates_to_fetch.add(mapped_tpl_id)
                       logger.debug(f"Added mapped template {mapped_tpl_id} for file {file_id} pre-fetch.")
 
@@ -174,18 +176,18 @@ def process_files():
                      schema = metadata_application.get_template_schema(main_client, scope, key)
                      # schema can be a dict (schema), {} (empty schema), or {error_status: ...} (error) or None (error)
 
-                     if schema and not (isinstance(schema, dict) and schema.get(\'error_status\')):
+                     if schema and not (isinstance(schema, dict) and schema.get('error_status')):
                          # If schema was successfully fetched and is not an error dict
                          # Convert schema to the fields format expected by the task function
                          fields_for_ai = []
                          for field_key, field_info in schema.items():
-                             field_type_val = field_info.get(\'type\', \'string\') if isinstance(field_info, dict) else \'string\' # Handle potential non-dict info
-                             display_name_val = field_info.get(\'displayName\', field_key.replace(\'_\', \' \').title()) if isinstance(field_info, dict) else field_key.replace(\'_\', \' \').title()
-                             fields_for_ai.append({\'key\': field_key, \'type\': field_type_val, \'displayName\': display_name_val})
+                             field_type_val = field_info.get('type', 'string') if isinstance(field_info, dict) else 'string' # Handle potential non-dict info
+                             display_name_val = field_info.get('displayName', field_key.replace('_', ' ').title()) if isinstance(field_info, dict) else field_key.replace('_', ' ').title()
+                             fields_for_ai.append({'key': field_key, 'type': field_type_val, 'displayName': display_name_val})
                          structured_template_fields_map[tpl_id] = fields_for_ai
                          logger.info(f"Successfully pre-fetched and formatted fields for {tpl_id}.")
-                     elif isinstance(schema, dict) and schema.get(\'error_status\'):
-                          st.warning(f"Could not pre-fetch schema for template ID {tpl_id}. Box API Error: {schema.get(\'message\', \'Unknown\')}. Check console.")
+                     elif isinstance(schema, dict) and schema.get('error_status'):
+                          st.warning(f"Could not pre-fetch schema for template ID {tpl_id}. Box API Error: {schema.get('message', 'Unknown')}. Check console.")
                           logger.error(f"Failed to pre-fetch schema for {tpl_id} with error info: {schema}")
                           # Optionally store the error info in the map so the worker task knows why it failed
                           structured_template_fields_map[tpl_id] = schema # Store error dict
@@ -203,7 +205,7 @@ def process_files():
                      logger.error(f"Unexpected error pre-fetching schema for {tpl_id}: {e}", exc_info=True)
                      structured_template_fields_map[tpl_id] = {"error_status": "unexpected_error", "message": f"Unexpected error: {e}"} # Store error dict
 
-             if is_structured and not structured_template_fields_map and has_any_mapping or (global_structured_template_id and not structured_template_fields_map):
+             if is_structured and not structured_template_fields_map and (has_any_mapping or global_structured_template_id): # Check if templates were supposed to be fetched but none were successful
                  st.error("Structured extraction is configured, but no template schemas could be pre-fetched successfully. Please check template IDs and permissions.")
                  # Consider disabling the start button or returning here if pre-fetch is critical
                  # For now, let the task fail gracefully if fields are missing
@@ -211,10 +213,10 @@ def process_files():
 
         # Start Button Logic (Modified)
         start_button = st.button(
-            \'Start Parallel Extraction Job\',
+            'Start Parallel Extraction Job',
             disabled=st.session_state.extraction_job_running, # Use the new flag
             use_container_width=True,
-            key=\'start_bg_extraction_button\'
+            key='start_bg_extraction_button'
         )
 
         # Display progress/status if job is running or finished
@@ -240,9 +242,9 @@ def process_files():
         # This code will execute in the rerun where extraction_job_running is True and summary is None
         if st.session_state.extraction_job_running and not st.session_state.extraction_job_summary:
             # *** THIS CALL WILL BLOCK THE STREAMLIT UI ***
-            logger.info(\'Calling blocking run_extraction_tasks_background...\')
+            logger.info('Calling blocking run_extraction_tasks_background...')
             files_list_for_processing = list(st.session_state.selected_files) # Ensure it\'s a list
-            categorization_for_tasks = st.session_state.get(\'document_categorization\', {}) # Pass the whole dict
+            categorization_for_tasks = st.session_state.get('document_categorization', {}) # Pass the whole dict
 
             # Catch errors during the blocking call
             try:
@@ -263,8 +265,8 @@ def process_files():
                 file_status_details = {} # This is for the summary display {file_id: {name, status, message}}
 
                 # Get original file names for summary details
-                original_selected_files = st.session_state.get(\'selected_files\', [])
-                original_file_names = {str(f[\'id\']): f.get(\'name\', str(f[\'id\'])) for f in original_selected_files}
+                original_selected_files = st.session_state.get('selected_files', [])
+                original_file_names = {str(f['id']): f.get('name', str(f['id'])) for f in original_selected_files}
 
 
                 for file_id, (success, result_or_error) in collected_results.items():
@@ -283,10 +285,10 @@ def process_files():
 
                 st.session_state.extraction_results = final_extraction_results
                 st.session_state.extraction_job_summary = {
-                    \'total_files\': len(files_list_for_processing),
-                    \'success_count\': success_count,
-                    \'error_count\': error_count,
-                    \'details\': file_status_details
+                    'total_files': len(files_list_for_processing),
+                    'success_count': success_count,
+                    'error_count': error_count,
+                    'details': file_status_details
                 }
                 st.session_state.extraction_job_running = False # Mark job as finished
                 logger.info("Blocking extraction call returned. Session state updated.")
@@ -294,14 +296,14 @@ def process_files():
             except Exception as e:
                 logger.error(f"Error during blocking extraction task execution: {e}", exc_info=True)
                 # Create a summary indicating all files failed due to the job error
-                files_list_for_processing = st.session_state.get(\'selected_files\', []) # Re-get files if needed
-                original_file_names = {str(f[\'id\']): f.get(\'name\', str(f[\'id\'])) for f in files_list_for_processing}
+                files_list_for_processing = st.session_state.get('selected_files', []) # Re-get files if needed
+                original_file_names = {str(f['id']): f.get('name', str(f['id'])) for f in files_list_for_processing}
 
                 st.session_state.extraction_job_summary = {
-                     \'total_files\': len(files_list_for_processing),
-                     \'success_count\': 0,
-                     \'error_count\': len(files_list_for_processing),
-                     \'details\': {str(f[\'id\']): {"file_name": original_file_names.get(str(f[\'id\']), str(f[\'id\'])), "status": "Failed", "message": f"Job failed due to unexpected error: {e}"} for f in files_list_for_processing}
+                     'total_files': len(files_list_for_processing),
+                     'success_count': 0,
+                     'error_count': len(files_list_for_processing),
+                     'details': {str(f['id']): {"file_name": original_file_names.get(str(f['id']), str(f['id'])), "status": "Failed", "message": f"Job failed due to unexpected error: {e}"} for f in files_list_for_processing}
                 }
                 st.session_state.extraction_results = {} # Clear results on job failure
                 st.session_state.extraction_job_running = False # Mark job as finished
@@ -316,29 +318,31 @@ def process_files():
         if not st.session_state.extraction_job_running and st.session_state.extraction_job_summary:
             summary = st.session_state.extraction_job_summary
             st.subheader("Extraction Job Summary")
-            st.write(f"Total files: {summary[\'total_files\']}")
-            st.write(f"Successfully extracted: {summary[\'success_count\']}")
-            st.write(f"Errors: {summary[\'error_count\']}")
+            st.write(f"Total files: {summary['total_files']}")
+            st.write(f"Successfully extracted: {summary['success_count']}")
+            st.write(f"Errors: {summary['error_count']}")
 
-            if summary[\'error_count\'] > 0:
+            if summary['error_count'] > 0:
                  st.warning("Some files failed extraction. Check detailed status below.")
 
             with st.expander("Detailed Results Summary", expanded=False):
-                 if summary.get(\'details\'):
-                     for file_id, detail in summary[\'details\'].items():
-                         icon = "✅" if detail[\'status\'] == \'Success\' else "❌"
-                         st.markdown(f"**{detail[\'file_name\']} ({file_id})**: {icon} {detail[\'status\"]}")
-                         if detail[\'message\'] and detail[\'status\'] != \'Success\':
-                             st.error(f"> {detail[\'message\"]}")
-                         elif detail[\'message\'] and detail[\'status\'] == \'Success\':
-                             st.info(f"> {detail[\'message\"]}") # Show success messages too
+                 if summary.get('details'):
+                     for file_id, detail in summary['details'].items():
+                         icon = "✅" if detail['status'] == 'Success' else "❌"
+                         st.markdown(f"**{detail['file_name']} ({file_id})**: {icon} {detail['status']}")
+                         if detail['message'] and detail['status'] != 'Success':
+                             st.error(f"> {detail['message']}")
+                         elif detail['message'] and detail['status'] == 'Success':
+                             st.info(f"> {detail['message']}") # Show success messages too
 
             # Add navigation to results page
             # Only show button if there are successful results to view
             if st.session_state.extraction_results: # Check if extraction_results is not empty
-                 if st.button("View Successful Extraction Results", key=\'go_to_results_after_extraction\'):
+                 if st.button("View Successful Extraction Results", key='go_to_results_after_extraction'):
                      # Set selected_result_ids to successful ones if the View Results page needs it
-                     successful_ids = [f_id for f_id, (success, _) in collected_results.items() if success] # Use local results
+                     # Need to check the keys in extraction_results for what was successful,
+                     # or use the status from the job summary details
+                     successful_ids = [f_id for f_id, det in summary['details'].items() if det['status'] == 'Success']
                      st.session_state.selected_result_ids = successful_ids
                      st.session_state.current_page = "View Results"
                      st.rerun()
