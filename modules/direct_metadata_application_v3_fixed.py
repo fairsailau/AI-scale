@@ -8,8 +8,8 @@ as independent tasks for concurrent processing.
 import streamlit as st
 import logging
 import json
-import time # For UI refresh during background tasks (no longer used for polling threads)
-import concurrent.futures # For concurrent processing
+# Removed time import as it's not used in the blocking worker logic
+import concurrent.futures
 from boxsdk import Client, exception
 from boxsdk.object.metadata import MetadataUpdate
 from dateutil import parser
@@ -19,6 +19,7 @@ from typing import Dict, Any, Tuple, List, Optional
 # Assume utils is in .utils
 from . import utils # Import utils module to use get_box_client
 
+# Corrected logging format string - must be a single line
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # IMPORTANT: This function should ONLY be called from the main Streamlit thread
 # It uses st.session_state for caching.
-if \'template_schema_cache\' not in st.session_state:
+if 'template_schema_cache' not in st.session_state:
     st.session_state.template_schema_cache = {}
 
 def get_template_schema(client: Client, full_scope: str, template_key: str) -> Optional[Dict[str, Any]]:
@@ -34,7 +35,7 @@ def get_template_schema(client: Client, full_scope: str, template_key: str) -> O
     Fetches and caches template schema from Box.
     **IMPORTANT**: Call this only from the main Streamlit thread.
     """
-    cache_key = f\'{full_scope}_{template_key}\'
+    cache_key = f'{full_scope}_{template_key}'
     # Access st.session_state is SAFE here because this is assumed to be called
     # ONLY from the main Streamlit thread before background tasks start.
     if cache_key in st.session_state.template_schema_cache:
@@ -45,9 +46,9 @@ def get_template_schema(client: Client, full_scope: str, template_key: str) -> O
     try:
         logger.info(f"SF_APPLY: Fetching template schema for {full_scope}/{template_key}")
         template = client.metadata_template(full_scope, template_key).get()
-        if template and hasattr(template, \'fields\') and template.fields:
+        if template and hasattr(template, 'fields') and template.fields:
             schema_map = {
-                field[\'key\']: {\'type\': field[\'type\'], \'displayName\': field.get(\'displayName\', field[\'key\'])}
+                field['key']: {'type': field['type'], 'displayName': field.get('displayName', field['key'])}
                 for field in template.fields
             }
             # Writing to st.session_state is SAFE here (main thread)
@@ -75,36 +76,37 @@ def get_template_schema(client: Client, full_scope: str, template_key: str) -> O
 # as they were in your snippet, ensuring they do NOT access st.session_state or globals.
 # They are assumed to be pure functions or use only passed arguments.
 
+# Corrected string literals in convert_value_for_template
 def convert_value_for_template(key: str, value: Any, field_type: str) -> Any:
     """Converts a value to the type specified by the Box metadata template field."""
     if value is None:
         return None
     original_value_repr = repr(value)
     try:
-        if field_type == \'float\':
+        if field_type == 'float':
             if isinstance(value, str):
-                cleaned_value = value.replace(\'$\', \'\').replace(\\,\', \'\').strip() # Added strip
+                cleaned_value = value.replace('$', '').replace(',', '').strip() # Added strip
                 try: return float(cleaned_value)
                 except ValueError: raise ConversionError(f"Could not convert string `{value}` to float for key `{key}`.")
             elif isinstance(value, (int, float)): return float(value)
             else: raise ConversionError(f"Value {original_value_repr} for key `{key}` is not a string or number.")
-        elif field_type == \'date\':
+        elif field_type == 'date':
             if isinstance(value, str):
                 try:
                     # Handle common date formats, ensure timezone-aware UTC
                     dt = parser.parse(value)
                     dt = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-                    return dt.strftime(\'%Y-%m-%dT%H:%M:%SZ\')
+                    return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
                 except (parser.ParserError, ValueError) as e: raise ConversionError(f"Could not parse date string `{value}` for key `{key}`: {e}.")
             else: raise ConversionError(f"Value {original_value_repr} for key `{key}` is not a string.")
-        elif field_type in [\'string\', \'enum\']:
+        elif field_type in ['string', 'enum']:
             return str(value)
-        elif field_type == \'multiSelect\':
+        elif field_type == 'multiSelect':
             if isinstance(value, list): return [str(item) for item in value]
             elif isinstance(value, str):
                 try:
                     # Attempt to parse a string list like '["item1", "item2"]'
-                    if value.strip().startswith(\'[\') and value.strip().endswith(\"]\'):
+                    if value.strip().startswith('[') and value.strip().endswith(']'):
                         parsed_list = json.loads(value)
                         if isinstance(parsed_list, list): return [str(item).strip() for item in parsed_list if str(item).strip()] # Ensure list of strings, skip empty
                 except json.JSONDecodeError: pass # Not a JSON list string, treat as single item list below
@@ -139,16 +141,16 @@ def flatten_metadata_for_template(metadata_values: Dict[str, Any]) -> Dict[str, 
 
     if is_structured_ai_response:
         logger.debug("Detected structured AI response format with 'answer'. Flattening.")
-        for k, v_obj in metadata_values[\'answer\'].items():
+        for k, v_obj in metadata_values['answer'].items():
             # Only include keys that correspond to actual fields we expect to map
             # (Further filtering will happen based on template schema)
-            flattened[k] = v_obj[\'value\']
+            flattened[k] = v_obj['value']
     else:
         logger.debug("AI response does not look like structured 'answer' format. Using top-level keys.")
         flattened = metadata_values.copy()
 
     # Remove common AI or wrapper keys from the final flattened dict
-    keys_to_remove = [\'ai_agent_info\', \'created_at\', \'completion_reason\', \'answer\']
+    keys_to_remove = ['ai_agent_info', 'created_at', 'completion_reason', 'answer']
     for k_rem in keys_to_remove:
         flattened.pop(k_rem, None)
 
@@ -158,23 +160,23 @@ def flatten_metadata_for_template(metadata_values: Dict[str, Any]) -> Dict[str, 
 def filter_confidence_fields(metadata_values: Dict[str, Any]) -> Dict[str, Any]:
     """Removes _confidence fields."""
     if not isinstance(metadata_values, dict): return {}
-    return {k: v for k, v in metadata_values.items() if not k.endswith(\'_confidence\')}
+    return {k: v for k, v in metadata_values.items() if not k.endswith('_confidence')}
 
 def parse_template_id(template_id_full: str) -> Tuple[str, str]:
     """Parses a full template ID (e.g., "enterprise_12345_templateKey") into scope and templateKey."""
-    if not template_id_full or \'_\' not in template_id_full:
+    if not template_id_full or '_' not in template_id_full:
         raise ValueError(f"Invalid template ID format: {template_id_full}.")
 
     # Handle enterprise_<id>_<key> format
     if template_id_full.startswith("enterprise_"):
-        parts = template_id_full.split(\'_\', 2) # Split at most twice
+        parts = template_id_full.split('_', 2) # Split at most twice
         if len(parts) == 3 and parts[1].isdigit():
              return f"{parts[0]}_{parts[1]}", parts[2] # scope = enterprise_id, key = templateKey
         # Fallback for simpler enterprise_key? Unlikely in practice for enterprise
-        # return "enterprise", template_id_full.split(\'_\', 1)[1] if len(parts) > 1 else template_id_full
+        # return "enterprise", template_id_full.split('_', 1)[1] if len(parts) > 1 else template_id_full
 
     # Handle other standard formats like global_key
-    idx = template_id_full.rfind(\'_\')
+    idx = template_id_full.rfind('_')
     if idx == -1 or idx == 0 or idx == len(template_id_full) - 1:
          raise ValueError(f"Invalid template ID: {template_id_full}")
 
@@ -190,7 +192,8 @@ def parse_template_id(template_id_full: str) -> Tuple[str, str]:
 
 # --- Single File Metadata Application Worker (MODIFIED) ---
 
-MISSING_GLOBAL_PROPERTIES_ERROR_MSG = "The \'global/properties\' metadata template was not found. Please create it in Box Admin Console > Content > Metadata, or use the option on the View Results page to create a custom template from AI output."
+# Corrected error message string
+MISSING_GLOBAL_PROPERTIES_ERROR_MSG = "The 'global/properties' metadata template was not found. Please create it in Box Admin Console > Content > Metadata, or use the option on the View Results page to create a custom template from AI output."
 
 def apply_metadata_to_single_file_task(
     box_config: Dict[str, Any], # NEW: Configuration for Box client
@@ -254,7 +257,7 @@ def apply_metadata_to_single_file_task(
         final_md_ops = {}
         conv_errors = []
         for schema_k, field_detail in template_schema.items():
-            field_type = field_detail.get(\'type\')
+            field_type = field_detail.get('type')
             if schema_k in metadata_no_conf:
                 try:
                     conv_val = convert_value_for_template(schema_k, metadata_no_conf[schema_k], field_type)
@@ -339,7 +342,7 @@ def run_application_tasks_background(
     Orchestrates metadata application for multiple files using ThreadPoolExecutor.
     Collects results and returns them. This function blocks until all tasks complete.
     Each item in files_to_apply should be a dict:
-    {\'file_id\': str, \'file_name\': str, \'ai_response\': dict, \'template_id_for_application\': str}
+    {'file_id': str, 'file_name': str, 'ai_response': dict, 'template_id_for_application': str}
     """
     logger.info(f"Starting concurrent metadata application for {len(files_to_apply)} files with {max_workers} workers...")
 
@@ -350,20 +353,21 @@ def run_application_tasks_background(
         tasks_submitted_count = 0 # Track how many tasks were actually submitted
 
         for task_data in files_to_apply:
-            file_id = task_data[\'file_id\']
-            file_name = task_data.get(\'file_name\', f\'File {file_id}\')
-            ai_response = task_data[\'ai_response\']
-            template_id_for_app = task_data.get(\'template_id_for_application\') # Can be None or "freeform_prompt_based"
+            file_id = task_data['file_id']
+            file_name = task_data.get('file_name', f'File {file_id}')
+            ai_response = task_data['ai_response']
+            template_id_for_app = task_data.get('template_id_for_application') # Can be None or "freeform_prompt_based"
 
             target_full_scope = "global"
             target_template_key = "properties" # Default for freeform/unspecified
             template_schema_for_task = None # This will hold the schema dict or error dict/None
+            schema_map_key = None
 
             # Determine the target template and get the pre-fetched schema/error info
             if template_id_for_app and template_id_for_app != "freeform_prompt_based":
                 try:
                     target_full_scope, target_template_key = parse_template_id(template_id_for_app)
-                    schema_map_key = f\'{target_full_scope}_{target_template_key}\'
+                    schema_map_key = f'{target_full_scope}_{target_template_key}'
                     template_schema_for_task = template_schemas_map.get(schema_map_key)
                     # Note: template_schema_for_task can be a dict (the schema), {} (empty schema), or None (pre-fetch failed/404) or {error_status: ...}
 
@@ -391,6 +395,12 @@ def run_application_tasks_background(
                      logger.warning(f"Skipping task for {file_name} due to missing/failed pre-fetch of template global/properties (freeform default).")
                      application_results_collected[file_id] = (False, MISSING_GLOBAL_PROPERTIES_ERROR_MSG) # Use the standard message
                      continue # Skip submitting this task
+            else:
+                 # Should not happen, but as a safeguard
+                 err_msg = f"Could not determine target template for file {file_id}."
+                 logger.error(err_msg)
+                 application_results_collected[file_id] = (False, err_msg)
+                 continue
 
 
             # If we reached here, the template schema/error info was found in the pre-fetched map
